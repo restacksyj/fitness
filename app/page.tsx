@@ -117,6 +117,7 @@ export default function Home() {
   const [activeSection, setActiveSection] = useState<"workouts" | "exercises" | "progress" | "weight">("exercises");
   const [userKey, setUserKey] = useState("");
   const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
   const [authUserEmail, setAuthUserEmail] = useState("");
   const [authLoading, setAuthLoading] = useState(true);
   const [authMessage, setAuthMessage] = useState("");
@@ -307,14 +308,23 @@ export default function Home() {
 
   async function signInWithEmail() {
     const email = authEmail.trim();
-    if (!email) return alert("Enter your email.");
+    if (!email || !authPassword) return alert("Enter your email and password.");
     setAuthMessage("");
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: window.location.origin },
-    });
+    const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword });
     if (error) return alert(error.message);
-    setAuthMessage("Check your email for the sign-in link.");
+    setAuthPassword("");
+    setAuthModalOpen(false);
+  }
+
+  async function signUpWithEmail() {
+    const email = authEmail.trim();
+    if (!email || !authPassword) return alert("Enter your email and password.");
+    if (authPassword.length < 6) return alert("Password must be at least 6 characters.");
+    setAuthMessage("");
+    const { error } = await supabase.auth.signUp({ email, password: authPassword });
+    if (error) return alert(error.message);
+    setAuthPassword("");
+    setAuthMessage("Account created. If email confirmations are enabled, check your email, then sign in.");
   }
 
   async function signOut() {
@@ -1444,12 +1454,14 @@ export default function Home() {
           <Dialog.Overlay className="dialog-overlay" />
           <Dialog.Content className="dialog-content">
             <Dialog.Title className="dialog-title">Sign in</Dialog.Title>
-            <Dialog.Description className="dialog-description">Use the same email on iPhone and web to sync your data.</Dialog.Description>
+            <Dialog.Description className="dialog-description">Use the same email and password on iPhone and web to sync your data.</Dialog.Description>
             <input className="input" type="email" placeholder="Email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} />
+            <input className="input" type="password" placeholder="Password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} />
             {authMessage && <p className="muted">{authMessage}</p>}
             <div className="dialog-actions">
               <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
-              <button className="btn" onClick={signInWithEmail}>Send link</button>
+              <button className="btn secondary" onClick={signUpWithEmail}>Create account</button>
+              <button className="btn" onClick={signInWithEmail}>Sign in</button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
