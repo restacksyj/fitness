@@ -21,7 +21,7 @@ function dateToInputValue(date?: Date) {
     return date ? format(date, "yyyy-MM-dd") : "";
 }
 
-function DateRangePickerField({ from, to, onChange }: { from: string; to: string; onChange: (range: { from: string; to: string }) => void }) {
+function DateRangePickerField({ from, to, onChange, compact = false }: { from: string; to: string; onChange: (range: { from: string; to: string }) => void; compact?: boolean }) {
     const selected: DateRange | undefined = from || to ? { from: inputDateToDate(from), to: inputDateToDate(to) } : undefined;
     const label = selected?.from
         ? selected.to
@@ -32,9 +32,9 @@ function DateRangePickerField({ from, to, onChange }: { from: string; to: string
     return (
         <Dialog.Root>
             <Dialog.Trigger asChild>
-                <button className="date-picker-trigger" type="button" aria-label="Date range">
+                <button className={compact ? "bare-icon-btn" : "date-picker-trigger"} type="button" aria-label="Date range" title={label}>
                     <Calendar size={16} />
-                    <span>{label}</span>
+                    {!compact && <span>{label}</span>}
                 </button>
             </Dialog.Trigger>
             <Dialog.Portal>
@@ -239,6 +239,7 @@ export default function HistoryPage() {
                     <Search className="input-icon" size={17} />
                     <input
                         className="input with-icon with-clear"
+                        style={{ paddingRight: 82 }}
                         placeholder="Search exercise records"
                         value={search}
                         onFocus={() => setIsSearchFocused(true)}
@@ -249,10 +250,22 @@ export default function HistoryPage() {
                         }}
                     />
                     {search && (
-                        <button className="clear-input" aria-label="Clear exercise search" onClick={() => updateSearch("")}>
+                        <button className="clear-input" style={{ right: 42 }} aria-label="Clear exercise search" onClick={() => updateSearch("")}>
                             <X size={16} />
                         </button>
                     )}
+                    <div style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)" }}>
+                        <DateRangePickerField
+                            compact
+                            from={dateFrom}
+                            to={dateTo}
+                            onChange={(range) => {
+                                setDateFrom(range.from);
+                                setDateTo(range.to);
+                                setPage(0);
+                            }}
+                        />
+                    </div>
                     {isSearchFocused && exerciseSuggestions.length > 0 && (
                         <div className="exercise-suggestions" role="listbox">
                             {exerciseSuggestions.map((exercise) => (
@@ -279,16 +292,6 @@ export default function HistoryPage() {
                         </div>
                     )}
                 </div>
-
-                <DateRangePickerField
-                    from={dateFrom}
-                    to={dateTo}
-                    onChange={(range) => {
-                        setDateFrom(range.from);
-                        setDateTo(range.to);
-                        setPage(0);
-                    }}
-                />
 
                 {pageRows.length ? (
                     <>

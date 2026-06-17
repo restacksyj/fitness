@@ -6,8 +6,9 @@ import { format } from "date-fns";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, BrushCleaning, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, GripVertical, LogIn, LogOut, Plus, Save, Search, TrendingUp, Trash2, Weight, X } from "lucide-react";
+import { Activity, BrushCleaning, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, GripVertical, LogIn, LogOut, Plus, RefreshCw, Save, Search, SlidersHorizontal, TrendingUp, Trash2, Weight, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
+import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
 import { blankExercise, blankSet, loadWorkoutDraft, saveWorkoutDraft, type ExerciseDraft, type SetRow } from "@/lib/workout-draft";
 
@@ -15,6 +16,8 @@ type WorkoutWithExercises = Workout & { workout_exercises: WorkoutExercise[] };
 type ExerciseTrackerDraft = { exerciseName: string; sets: SetRow[] };
 type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" };
 type EditableWorkoutExercise = { id: string; name: string; setRows: WorkoutSetRow[] };
+type OfflineWorkoutPayload = { name: string; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
+type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on: string; notes: string | null };
 
 const TRACKER_DRAFT_KEY = "progressfit-exercise-tracker-draft";
 const formatWorkoutName = (date = new Date()) => date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
@@ -23,6 +26,8 @@ const blankTrackerSets = () => [blankSet(), blankSet(), blankSet()];
 const PAGE_SIZE = 10;
 const WEIGHT_PAGE_SIZE = 10;
 const todayInputValue = () => new Date().toISOString().slice(0, 10);
+const SECTION_STORAGE_KEY = "progressfit-active-section";
+type ActiveSection = "workouts" | "exercises" | "progress" | "weight";
 
 function loadTrackerDraft(): ExerciseTrackerDraft | null {
   if (typeof window === "undefined") return null;
@@ -77,7 +82,7 @@ function DatePickerField({ label, value, onChange }: { label: string; value: str
   );
 }
 
-function DateRangePickerField({ from, to, onChange }: { from: string; to: string; onChange: (range: { from: string; to: string }) => void }) {
+function DateRangePickerField({ from, to, onChange, compact = false }: { from: string; to: string; onChange: (range: { from: string; to: string }) => void; compact?: boolean }) {
   const selected: DateRange | undefined = from || to ? { from: inputDateToDate(from), to: inputDateToDate(to) } : undefined;
   const label = selected?.from
     ? selected.to
@@ -88,9 +93,9 @@ function DateRangePickerField({ from, to, onChange }: { from: string; to: string
   return (
     <Dialog.Root>
       <Dialog.Trigger asChild>
-        <button className="date-picker-trigger" type="button" aria-label="Date range">
+        <button className={compact ? "bare-icon-btn" : "date-picker-trigger"} type="button" aria-label="Date range" title={label}>
           <Calendar size={16} />
-          <span>{label}</span>
+          {!compact && <span>{label}</span>}
         </button>
       </Dialog.Trigger>
       <Dialog.Portal>
@@ -114,7 +119,11 @@ function DateRangePickerField({ from, to, onChange }: { from: string; to: string
 }
 
 export default function Home() {
-  const [activeSection, setActiveSection] = useState<"workouts" | "exercises" | "progress" | "weight">("exercises");
+  const [activeSection, setActiveSection] = useState<ActiveSection>(() => {
+    if (typeof window === "undefined") return "exercises";
+    const saved = localStorage.getItem(SECTION_STORAGE_KEY);
+    return saved === "workouts" || saved === "exercises" || saved === "progress" || saved === "weight" ? saved : "exercises";
+  });
   const [userKey, setUserKey] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -165,6 +174,15 @@ export default function Home() {
   const [saving, setSaving] = useState(false);
   const [savingExerciseId, setSavingExerciseId] = useState("");
   const [toast, setToast] = useState("");
+  const [isOnline, setIsOnline] = useState(true);
+  const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+  const [syncingOffline, setSyncingOffline] = useState(false);
+  const [workoutTypeFilter, setWorkoutTypeFilter] = useState<"all" | "workout" | "exercise">("all");
+  const [workoutTypeFilterOpen, setWorkoutTypeFilterOpen] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem(SECTION_STORAGE_KEY, activeSection);
+  }, [activeSection]);
 
   useEffect(() => {
     const trackerDraft = loadTrackerDraft();
@@ -175,7 +193,9 @@ export default function Home() {
 
     const workoutDraft = loadWorkoutDraft();
     if (workoutDraft) {
-      const exercises = workoutDraft.exercises.filter((exercise) => exercise.name.trim());
+      const exercises = workoutDraft.exercises
+        .filter((exercise) => exercise.name.trim())
+        .map((exercise) => exercise.savedExerciseId?.startsWith("offline-") ? { ...exercise, savedExerciseId: undefined } : exercise);
       setWorkoutName(workoutDraft.workoutName);
       setCurrentWorkoutId(workoutDraft.workoutId ?? "");
       setWorkoutQueue(exercises);
@@ -215,6 +235,30 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    setIsOnline(navigator.onLine);
+    const handleOnline = () => {
+      setIsOnline(true);
+      processOfflineQueue();
+    };
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [userKey]);
+
+  useEffect(() => {
+    if (!userKey) return;
+    refreshOfflineCount(userKey);
+    if (navigator.onLine) {
+      processOfflineQueue(userKey).catch((error) => console.error(error.message));
+      warmExerciseCatalogCache().catch((error) => console.error(error.message));
+    }
+  }, [userKey]);
+
+  useEffect(() => {
     if (!draftReady) return;
     saveTrackerDraft({ exerciseName, sets });
   }, [draftReady, exerciseName, sets]);
@@ -240,13 +284,19 @@ export default function Home() {
 
   useEffect(() => {
     const query = exerciseName.trim();
-    if (!isSupabaseConfigured || query.length < 2) {
+    if (query.length < 2) {
       setCatalogSuggestions([]);
       return;
     }
 
     let cancelled = false;
     const timeout = window.setTimeout(async () => {
+      if (!navigator.onLine || !isSupabaseConfigured) {
+        const cached = await searchCachedExerciseCatalog(query, 8);
+        if (!cancelled) setCatalogSuggestions(cached.filter((exercise) => normalise(exercise.name) !== normalise(query)).map((exercise) => ({ ...exercise, source: "catalog" })));
+        return;
+      }
+
       const { data, error } = await supabase
         .from("exercise_catalog")
         .select("id,name,category,muscles,equipment,image_url")
@@ -257,12 +307,15 @@ export default function Home() {
       if (cancelled) return;
       if (error) {
         console.error(error.message);
-        setCatalogSuggestions([]);
+        const cached = await searchCachedExerciseCatalog(query, 8);
+        setCatalogSuggestions(cached.map((exercise) => ({ ...exercise, source: "catalog" })));
         return;
       }
 
+      const rows = (data ?? []) as Omit<ExerciseSuggestion, "source">[];
+      await cacheExerciseCatalog(rows);
       setCatalogSuggestions(
-        ((data ?? []) as ExerciseSuggestion[])
+        rows
           .filter((exercise) => normalise(exercise.name) !== normalise(query))
           .map((exercise) => ({ ...exercise, source: "catalog" })),
       );
@@ -276,13 +329,19 @@ export default function Home() {
 
   useEffect(() => {
     const query = progressExercise.trim();
-    if (!isSupabaseConfigured || query.length < 2) {
+    if (query.length < 2) {
       setProgressCatalogSuggestions([]);
       return;
     }
 
     let cancelled = false;
     const timeout = window.setTimeout(async () => {
+      if (!navigator.onLine || !isSupabaseConfigured) {
+        const cached = await searchCachedExerciseCatalog(query, 8);
+        if (!cancelled) setProgressCatalogSuggestions(cached.map((exercise) => ({ ...exercise, source: "catalog" })));
+        return;
+      }
+
       const { data, error } = await supabase
         .from("exercise_catalog")
         .select("id,name,category,muscles,equipment,image_url")
@@ -293,11 +352,14 @@ export default function Home() {
       if (cancelled) return;
       if (error) {
         console.error(error.message);
-        setProgressCatalogSuggestions([]);
+        const cached = await searchCachedExerciseCatalog(query, 8);
+        setProgressCatalogSuggestions(cached.map((exercise) => ({ ...exercise, source: "catalog" })));
         return;
       }
 
-      setProgressCatalogSuggestions(((data ?? []) as ExerciseSuggestion[]).map((exercise) => ({ ...exercise, source: "catalog" })));
+      const rows = (data ?? []) as Omit<ExerciseSuggestion, "source">[];
+      await cacheExerciseCatalog(rows);
+      setProgressCatalogSuggestions(rows.map((exercise) => ({ ...exercise, source: "catalog" })));
     }, 180);
 
     return () => {
@@ -334,6 +396,107 @@ export default function Home() {
     setHistory([]);
     setRecentWorkouts([]);
     setBodyWeights([]);
+  }
+
+  async function refreshOfflineCount(key = userKey) {
+    setOfflineQueueCount(await getOfflineQueueCount(key));
+  }
+
+  async function warmExerciseCatalogCache() {
+    if (!navigator.onLine || !isSupabaseConfigured) return;
+    const cacheKey = "progressfit-exercise-catalog-cache-v1";
+    if (localStorage.getItem(cacheKey)) return;
+
+    const { data, error } = await supabase
+      .from("exercise_catalog")
+      .select("id,name,category,muscles,equipment,image_url")
+      .order("name", { ascending: true })
+      .range(0, 499);
+
+    if (error) return console.error(error.message);
+    await cacheExerciseCatalog((data ?? []) as Omit<ExerciseSuggestion, "source">[]);
+    localStorage.setItem(cacheKey, new Date().toISOString());
+  }
+
+  async function updateOfflineQueuedExercise(exercise: ExerciseDraft, name: string, rows: Array<{ set: number; reps: number; weight: number; notes?: string }>) {
+    const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
+    const queued = items.find((item) => {
+      if (item.type !== "save_workout") return false;
+      const payload = item.payload as OfflineWorkoutPayload;
+      return payload.exercises.length === 1 && normalise(payload.exercises[0].name) === normalise(exercise.name);
+    });
+    if (!queued?.id) return false;
+    await offlineDb.queue.update(queued.id, {
+      payload: {
+        name,
+        exercises: [{ name, sets: rows, notes: exercise.notes?.trim() || null, body_weight: currentBodyWeight }],
+      } satisfies OfflineWorkoutPayload,
+    });
+    return true;
+  }
+
+  async function deleteOfflineQueuedExercise(exercise: ExerciseDraft) {
+    const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
+    const queued = items.find((item) => {
+      if (item.type !== "save_workout") return false;
+      const payload = item.payload as OfflineWorkoutPayload;
+      return payload.exercises.length === 1 && normalise(payload.exercises[0].name) === normalise(exercise.name);
+    });
+    if (queued?.id) await offlineDb.queue.delete(queued.id);
+    await refreshOfflineCount();
+  }
+
+  async function executeOfflineItem(item: OfflineQueueItem) {
+    if (item.type === "save_body_weight") {
+      const payload = item.payload as OfflineBodyWeightPayload;
+      const { error } = await supabase.from("body_weights").upsert(payload, { onConflict: "user_key,measured_on" });
+      if (error) throw error;
+      return;
+    }
+
+    if (item.type === "save_workout") {
+      const payload = item.payload as OfflineWorkoutPayload;
+      const { data: workout, error: workoutError } = await supabase
+        .from("workouts")
+        .insert({ user_key: item.userKey, name: payload.name })
+        .select("id")
+        .single();
+      if (workoutError || !workout) throw workoutError ?? new Error("Could not sync workout");
+
+      const exercises = payload.exercises.map((exercise) => ({
+        workout_id: workout.id,
+        user_key: item.userKey,
+        exercise_name: exercise.name,
+        sets: exercise.sets.length,
+        reps: Math.max(...exercise.sets.map((set) => set.reps)),
+        weight: Math.max(...exercise.sets.map((set) => set.weight)),
+        volume: exercise.sets.reduce((sum, set) => sum + set.reps * set.weight, 0),
+        set_rows: exercise.sets,
+        notes: exercise.notes ?? null,
+        body_weight: exercise.body_weight ?? null,
+      }));
+
+      const { error } = await supabase.from("workout_exercises").insert(exercises);
+      if (error) throw error;
+    }
+  }
+
+  async function processOfflineQueue(key = userKey) {
+    if (!key || !navigator.onLine || !isSupabaseConfigured || syncingOffline) return;
+    setSyncingOffline(true);
+    try {
+      const items = await offlineDb.queue.where("userKey").equals(key).sortBy("createdAt");
+      for (const item of items) {
+        if (!item.id) continue;
+        await executeOfflineItem(item);
+        await offlineDb.queue.delete(item.id);
+      }
+      await refreshOfflineCount(key);
+      await loadData(key);
+      setWorkoutQueue((prev) => prev.map((exercise) => exercise.savedExerciseId?.startsWith("offline-") ? { ...exercise, savedExerciseId: undefined } : exercise));
+    } finally {
+      setSyncingOffline(false);
+    }
   }
 
   async function loadData(key = userKey) {
@@ -419,12 +582,14 @@ export default function Home() {
     return recentWorkouts.filter((workout) => {
       const workoutTime = new Date(workout.created_at).getTime();
       const exercises = workout.workout_exercises ?? [];
+      const inferredType = exercises.length > 1 ? "workout" : "exercise";
+      const matchesType = workoutTypeFilter === "all" || inferredType === workoutTypeFilter;
       const matchesSearch = !q || normalise(workout.name || "").includes(q) || exercises.some((exercise) => normalise(exercise.exercise_name).includes(q));
       const matchesFrom = fromTime === null || workoutTime >= fromTime;
       const matchesTo = toTime === null || workoutTime <= toTime;
-      return matchesSearch && matchesFrom && matchesTo;
+      return matchesType && matchesSearch && matchesFrom && matchesTo;
     });
-  }, [recentWorkouts, workoutDateFrom, workoutDateTo, workoutSearch]);
+  }, [recentWorkouts, workoutDateFrom, workoutDateTo, workoutSearch, workoutTypeFilter]);
 
   const workoutTotalPages = Math.max(1, Math.ceil(filteredWorkouts.length / PAGE_SIZE));
   const safeWorkoutPage = Math.min(workoutPage, workoutTotalPages - 1);
@@ -598,6 +763,22 @@ export default function Home() {
       .filter((exercise) => exercise.name && exercise.sets.length);
     const title = workoutNameInput.trim() || formatWorkoutName();
 
+    if (!navigator.onLine) {
+      await enqueueOffline({
+        userKey,
+        type: "save_workout",
+        payload: {
+          name: title,
+          exercises: rows.map(({ exercise, name, sets }) => ({ name, sets, notes: exercise.notes?.trim() || null, body_weight: currentBodyWeight })),
+        } satisfies OfflineWorkoutPayload,
+      });
+      await refreshOfflineCount();
+      setWorkoutNameModalOpen(false);
+      setToast(`${title} saved offline`);
+      setTimeout(() => setToast(""), 2200);
+      return;
+    }
+
     setSaving(true);
     const { data: workout, error: workoutError } = await supabase
       .from("workouts")
@@ -724,6 +905,34 @@ export default function Home() {
     if (!userKey || !Number.isFinite(weight) || weight <= 0 || !weightDate) return alert("Add a valid weight and date.");
 
     const payload = { user_key: userKey, weight, measured_on: weightDate, notes: weightNotes.trim() || null };
+
+    if (editingWeightId.startsWith("offline-")) {
+      const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
+      const queued = items.find((item) => item.type === "save_body_weight" && (item.payload as OfflineBodyWeightPayload).measured_on === weightDate);
+      if (queued?.id) await offlineDb.queue.update(queued.id, { payload: payload satisfies OfflineBodyWeightPayload });
+      setBodyWeights((current) => current.map((row) => row.id === editingWeightId ? { ...row, ...payload } : row));
+      setEditingWeightId("");
+      setWeightValue("");
+      setWeightNotes("");
+      setWeightDate(todayInputValue());
+      setToast("Offline weight updated");
+      setTimeout(() => setToast(""), 2200);
+      return;
+    }
+
+    if (!navigator.onLine && !editingWeightId) {
+      await enqueueOffline({ userKey, type: "save_body_weight", payload: payload satisfies OfflineBodyWeightPayload });
+      await refreshOfflineCount();
+      setBodyWeights((current) => [{ id: `offline-${Date.now()}`, created_at: new Date().toISOString(), ...payload }, ...current].slice(0, WEIGHT_PAGE_SIZE));
+      setBodyWeightCount((count) => count + 1);
+      setWeightValue("");
+      setWeightNotes("");
+      setWeightDate(todayInputValue());
+      setToast("Weight saved offline");
+      setTimeout(() => setToast(""), 2200);
+      return;
+    }
+
     const { error } = editingWeightId
       ? await supabase.from("body_weights").update(payload).eq("id", editingWeightId).eq("user_key", userKey)
       : await supabase.from("body_weights").upsert(payload, { onConflict: "user_key,measured_on" });
@@ -748,12 +957,21 @@ export default function Home() {
 
   async function confirmDeleteWeight() {
     if (!pendingDeleteWeight) return;
-    const { error } = await supabase.from("body_weights").delete().eq("id", pendingDeleteWeight.id).eq("user_key", userKey);
-    if (error) return alert(error.message);
+    if (pendingDeleteWeight.id.startsWith("offline-")) {
+      const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
+      const queued = items.find((item) => item.type === "save_body_weight" && (item.payload as OfflineBodyWeightPayload).measured_on === pendingDeleteWeight.measured_on);
+      if (queued?.id) await offlineDb.queue.delete(queued.id);
+      setBodyWeights((current) => current.filter((row) => row.id !== pendingDeleteWeight.id));
+      setBodyWeightCount((count) => Math.max(0, count - 1));
+      await refreshOfflineCount();
+    } else {
+      const { error } = await supabase.from("body_weights").delete().eq("id", pendingDeleteWeight.id).eq("user_key", userKey);
+      if (error) return alert(error.message);
+      await loadBodyWeights();
+    }
 
     setPendingDeleteWeight(null);
     setEditingWeightId("");
-    await loadBodyWeights();
     setToast("Weight deleted");
     setTimeout(() => setToast(""), 2200);
   }
@@ -777,6 +995,36 @@ export default function Home() {
     };
 
     setSavingExerciseId(exercise.id);
+
+    if (exercise.savedExerciseId?.startsWith("offline-")) {
+      const updated = await updateOfflineQueuedExercise(exercise, name, rows);
+      setSavingExerciseId("");
+      if (updated) {
+        setWorkoutQueue((prev) => prev.map((item) => item.id === exercise.id ? { ...item, name, sets: exercise.sets } : item));
+        setToast(navigator.onLine ? "Offline change updated and will sync automatically" : `${name} offline change updated`);
+      } else {
+        setToast(`${name} is already queued for sync`);
+      }
+      setTimeout(() => setToast(""), 2200);
+      return;
+    }
+
+    if (!navigator.onLine && !exercise.savedExerciseId) {
+      await enqueueOffline({
+        userKey,
+        type: "save_workout",
+        payload: {
+          name,
+          exercises: [{ name, sets: rows, notes: exercise.notes?.trim() || null, body_weight: currentBodyWeight }],
+        } satisfies OfflineWorkoutPayload,
+      });
+      await refreshOfflineCount();
+      setSavingExerciseId("");
+      setWorkoutQueue((prev) => prev.map((item) => item.id === exercise.id ? { ...item, savedExerciseId: `offline-${Date.now()}` } : item));
+      setToast(`${name} saved offline`);
+      setTimeout(() => setToast(""), 2200);
+      return;
+    }
 
     if (exercise.savedExerciseId) {
       const { error } = await supabase
@@ -911,7 +1159,9 @@ export default function Home() {
       : `Remove ${exercise.name} from this screen?`;
     if (!confirm(message)) return;
 
-    if (exercise.savedExerciseId) {
+    if (exercise.savedExerciseId?.startsWith("offline-")) {
+      await deleteOfflineQueuedExercise(exercise);
+    } else if (exercise.savedExerciseId) {
       const { error } = await supabase.from("workout_exercises").delete().eq("id", exercise.savedExerciseId).eq("user_key", userKey);
       if (error) return alert(error.message);
       await loadData();
@@ -928,11 +1178,14 @@ export default function Home() {
           <h1>ProgressFit</h1>
           <p>Track exercises, workouts, and body weight.</p>
         </div>
-        {authLoading ? null : authUserEmail ? (
-          <button className="bare-icon-btn hero-auth-btn" aria-label="Sign out" title={authUserEmail} onClick={signOut}><LogOut size={20} /></button>
-        ) : (
-          <button className="bare-icon-btn hero-auth-btn" aria-label="Sign in" onClick={() => setAuthModalOpen(true)}><LogIn size={20} /></button>
-        )}
+        <div className="hero-actions">
+          <button className="bare-icon-btn hero-auth-btn" aria-label="Refresh" onClick={() => window.location.reload()}><RefreshCw size={20} /></button>
+          {authLoading ? null : authUserEmail ? (
+            <button className="bare-icon-btn hero-auth-btn" aria-label="Sign out" title={authUserEmail} onClick={signOut}><LogOut size={20} /></button>
+          ) : (
+            <button className="bare-icon-btn hero-auth-btn" aria-label="Sign in" onClick={() => setAuthModalOpen(true)}><LogIn size={20} /></button>
+          )}
+        </div>
       </header>
 
       <nav className="top-nav" aria-label="Main sections">
@@ -941,6 +1194,13 @@ export default function Home() {
         <button className={activeSection === "progress" ? "active" : ""} onClick={() => setActiveSection("progress")}>Progress</button>
         <button className={activeSection === "weight" ? "active" : ""} onClick={() => setActiveSection("weight")}>Weight</button>
       </nav>
+
+      {(!isOnline || offlineQueueCount > 0) && (
+        <div className="sync-status">
+          <span>{isOnline ? syncingOffline ? "Syncing" : "Online" : "Offline"}</span>
+          <span>{offlineQueueCount} pending sync</span>
+        </div>
+      )}
 
       {activeSection === "exercises" && <section className="card stack recent-card">
         <div className="section-title">
@@ -959,6 +1219,12 @@ export default function Home() {
               setExerciseName(event.target.value);
               setSelectedExerciseMeta(null);
               setIsExerciseSearchFocused(true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                addToWorkout();
+              }
             }}
           />
           {exerciseName && (
@@ -1079,58 +1345,60 @@ export default function Home() {
                           })}
                         </div>
                       )}
-                      <div className="set-grid queued-set-grid table-head" aria-hidden="true">
-                        <span></span>
-                        <span>Sets</span>
-                        <span>Reps</span>
-                        <span>Weight</span>
-                        <span>Last best</span>
-                        <span>Notes</span>
-                        <span></span>
-                      </div>
-                      {exercise.sets.map((set, index) => (
-                        <div
-                          className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
-                          key={set.id}
-                          onDragOver={(event) => {
-                            event.preventDefault();
-                            setDragOverSetId(set.id);
-                          }}
-                          onDragLeave={() => setDragOverSetId("")}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            reorderQueuedSets(exercise.id, draggingSetId, set.id);
-                            setDraggingSetId("");
-                            setDragOverSetId("");
-                          }}
-                        >
-                          <button
-                            className="drag-handle"
-                            draggable
-                            aria-label={`Drag ${exercise.name} set ${index + 1} to reorder`}
-                            onDragStart={(event) => {
-                              setDraggingSetId(set.id);
-                              event.dataTransfer.effectAllowed = "move";
-                              event.dataTransfer.setData("text/plain", set.id);
+                      <div className="queued-set-table">
+                        <div className="set-grid queued-set-grid table-head" aria-hidden="true">
+                          <span></span>
+                          <span>Sets</span>
+                          <span>Reps</span>
+                          <span>Weight</span>
+                          <span>Last best</span>
+                          <span>Notes</span>
+                          <span></span>
+                        </div>
+                        {exercise.sets.map((set, index) => (
+                          <div
+                            className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
+                            key={set.id}
+                            onDragOver={(event) => {
+                              event.preventDefault();
+                              setDragOverSetId(set.id);
                             }}
-                            onDragEnd={() => {
+                            onDragLeave={() => setDragOverSetId("")}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              reorderQueuedSets(exercise.id, draggingSetId, set.id);
                               setDraggingSetId("");
                               setDragOverSetId("");
                             }}
                           >
-                            <GripVertical size={16} />
-                          </button>
-                          <span className="set-number">{index + 1}</span>
-                          <input className="input" inputMode="numeric" aria-label={`${exercise.name} set ${index + 1} reps`} placeholder="Reps" value={set.reps} onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })} />
-                          <input className="input" inputMode="decimal" aria-label={`${exercise.name} set ${index + 1} weight in lbs`} placeholder="lbs" value={set.weight} onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, "") })} />
-                          <span className="last-best">{lastBestForSet(exercise.name, index + 1)}</span>
-                          <input className="input set-notes-input" aria-label={`${exercise.name} set ${index + 1} notes`} placeholder="Notes" value={set.notes ?? ""} onChange={(event) => updateQueuedSet(exercise.id, set.id, { notes: event.target.value })} />
-                          <button className="bare-icon-btn" aria-label={`Remove ${exercise.name} set ${index + 1}`} onClick={() => removeQueuedSet(exercise.id, set.id)}><X size={14} /></button>
-                        </div>
-                      ))}
+                            <button
+                              className="drag-handle"
+                              draggable
+                              aria-label={`Drag ${exercise.name} set ${index + 1} to reorder`}
+                              onDragStart={(event) => {
+                                setDraggingSetId(set.id);
+                                event.dataTransfer.effectAllowed = "move";
+                                event.dataTransfer.setData("text/plain", set.id);
+                              }}
+                              onDragEnd={() => {
+                                setDraggingSetId("");
+                                setDragOverSetId("");
+                              }}
+                            >
+                              <GripVertical size={16} />
+                            </button>
+                            <span className="set-number">{index + 1}</span>
+                            <input className="input" inputMode="numeric" aria-label={`${exercise.name} set ${index + 1} reps`} placeholder="Reps" value={set.reps} onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })} />
+                            <input className="input" inputMode="decimal" aria-label={`${exercise.name} set ${index + 1} weight in lbs`} placeholder="lbs" value={set.weight} onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, "") })} />
+                            <span className="last-best">{lastBestForSet(exercise.name, index + 1)}</span>
+                            <input className="input set-notes-input" aria-label={`${exercise.name} set ${index + 1} notes`} placeholder="Notes" value={set.notes ?? ""} onChange={(event) => updateQueuedSet(exercise.id, set.id, { notes: event.target.value })} />
+                            <button className="bare-icon-btn" aria-label={`Remove ${exercise.name} set ${index + 1}`} onClick={() => removeQueuedSet(exercise.id, set.id)}><X size={14} /></button>
+                          </div>
+                        ))}
+                      </div>
                       <div className="row tracker-footer-row">
                         <button className="bare-icon-btn" aria-label={`Add set to ${exercise.name}`} onClick={() => addQueuedSet(exercise.id)}><Plus size={16} /></button>
-                        <button className="bare-icon-btn" aria-label={exercise.savedExerciseId ? `Update ${exercise.name}` : `Save ${exercise.name}`} disabled={savingExerciseId === exercise.id || !rows.length} onClick={() => saveQueuedExercise(exercise)}><Check size={16} /></button>
+                        <button className="bare-icon-btn" aria-label={exercise.savedExerciseId?.startsWith("offline-") ? `${exercise.name} queued for sync` : exercise.savedExerciseId ? `Update ${exercise.name}` : `Save ${exercise.name}`} disabled={savingExerciseId === exercise.id || !rows.length} onClick={() => saveQueuedExercise(exercise)}><Check size={16} /></button>
                       </div>
                       <p className="muted">{rows.length} valid {rows.length === 1 ? "set" : "sets"} • {volume} lbs volume</p>
                     </div>
@@ -1148,20 +1416,80 @@ export default function Home() {
             <h2><Activity size={18} /> Workouts</h2>
           </div>
 
-          <div className="input-icon-wrap">
-            <Search className="input-icon" size={17} />
-            <input className="input with-icon" placeholder="Search workouts or exercises" value={workoutSearch} onChange={(event) => { setWorkoutSearch(event.target.value); setWorkoutPage(0); }} />
+          <div className="workout-filters">
+            <div className="input-icon-wrap workout-search-field">
+              <Search className="input-icon" size={17} />
+              <input className="input with-icon" style={{ paddingRight: 82 }} placeholder="Search workouts or exercises" value={workoutSearch} onChange={(event) => { setWorkoutSearch(event.target.value); setWorkoutPage(0); }} />
+              <div style={{ position: "absolute", right: 42, top: "50%", transform: "translateY(-50%)" }}>
+                <DateRangePickerField
+                  compact
+                  from={workoutDateFrom}
+                  to={workoutDateTo}
+                  onChange={(range) => {
+                    setWorkoutDateFrom(range.from);
+                    setWorkoutDateTo(range.to);
+                    setWorkoutPage(0);
+                  }}
+                />
+              </div>
+              <div style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)" }}>
+                <button
+                  className="bare-icon-btn"
+                  aria-label="Filter workout type"
+                  aria-expanded={workoutTypeFilterOpen}
+                  onClick={() => setWorkoutTypeFilterOpen((open) => !open)}
+                  title={`Type: ${workoutTypeFilter[0].toUpperCase() + workoutTypeFilter.slice(1)}`}
+                >
+                  <SlidersHorizontal size={18} />
+                </button>
+                {workoutTypeFilterOpen && (
+                  <div
+                    role="menu"
+                    aria-label="Workout type options"
+                    style={{
+                      position: "absolute",
+                      right: 0,
+                      top: "calc(100% + 8px)",
+                      zIndex: 4,
+                      display: "grid",
+                      minWidth: 148,
+                      overflow: "hidden",
+                      border: "1px solid var(--line)",
+                      borderRadius: 14,
+                      background: "#fff",
+                      boxShadow: "0 14px 34px rgba(43,43,43,.12)",
+                    }}
+                  >
+                    {(["all", "workout", "exercise"] as const).map((type) => (
+                      <button
+                        key={type}
+                        role="menuitemradio"
+                        aria-checked={workoutTypeFilter === type}
+                        onClick={() => {
+                          setWorkoutTypeFilter(type);
+                          setWorkoutPage(0);
+                          setWorkoutTypeFilterOpen(false);
+                        }}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 12,
+                          padding: "11px 12px",
+                          background: workoutTypeFilter === type ? "#f5f5f5" : "#fff",
+                          color: "var(--text)",
+                          textAlign: "left",
+                        }}
+                      >
+                        <span>{type[0].toUpperCase() + type.slice(1)}</span>
+                        {workoutTypeFilter === type && <Check size={15} />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
-
-          <DateRangePickerField
-            from={workoutDateFrom}
-            to={workoutDateTo}
-            onChange={(range) => {
-              setWorkoutDateFrom(range.from);
-              setWorkoutDateTo(range.to);
-              setWorkoutPage(0);
-            }}
-          />
 
           {workoutRows.length ? (
             <>
@@ -1171,6 +1499,7 @@ export default function Home() {
                     <tr>
                       <th></th>
                       <th>Date</th>
+                      <th>Type</th>
                       <th>Workout</th>
                       <th>Exercises</th>
                       <th>Volume</th>
@@ -1182,6 +1511,7 @@ export default function Home() {
                       const isExpanded = selectedWorkoutId === workout.id;
                       const isEditingWorkout = editingWorkoutId === workout.id;
                       const exercises = workout.workout_exercises ?? [];
+                      const workoutType = exercises.length > 1 ? "Workout" : "Exercise";
                       const volume = exercises.reduce((sum, exercise) => sum + Number(exercise.volume || 0), 0);
                       return (
                         <Fragment key={workout.id}>
@@ -1192,6 +1522,7 @@ export default function Home() {
                               </button>
                             </td>
                             <td>{new Date(workout.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</td>
+                            <td>{workoutType}</td>
                             <td>{workout.name || formatWorkoutName(new Date(workout.created_at))}</td>
                             <td>{exercises.length}</td>
                             <td>{volume} lbs</td>
@@ -1222,25 +1553,39 @@ export default function Home() {
                             </td>
                           </tr>
                           {isExpanded && (
-                            <tr className="record-detail-row">
-                              <td colSpan={6}>
-                                <div className="record-detail-panel">
+                            <tr className="record-detail-row workout-detail-row">
+                              <td colSpan={7} style={{ padding: 0 }}>
+                                <div className="record-detail-panel workout-detail-panel" style={{ padding: 0, width: "min(100%, calc(100vw - 60px))" }}>
                                   {isEditingWorkout && (
                                     <div className="row action-row">
                                       <input className="detail-input" value={editWorkoutName} onChange={(event) => setEditWorkoutName(event.target.value)} aria-label="Workout name" />
-                                      <button className="btn secondary" onClick={cancelEditWorkout}>Cancel</button>
-                                      <button className="btn" onClick={() => saveEditWorkout(workout)}>Save changes</button>
+                                      <button className="bare-icon-btn" aria-label="Cancel editing workout" onClick={cancelEditWorkout}><X size={17} /></button>
+                                      <button className="bare-icon-btn" aria-label="Save workout changes" onClick={() => saveEditWorkout(workout)}><Check size={17} /></button>
                                     </div>
                                   )}
                                   {exercises.length ? (
-                                    <div className="recent-record-list workout-detail-list">
+                                    <div
+                                      className="recent-record-list"
+                                      style={{
+                                        border: 0,
+                                        borderRadius: 0,
+                                        background: "transparent",
+                                        gap: 8,
+                                        overflow: "visible",
+                                        padding: "10px 8px 12px 20px",
+                                      }}
+                                    >
                                       {exercises.map((exercise) => {
                                         const editExercise = editWorkoutExercises.find((item) => item.id === exercise.id);
                                         const setRows = exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }];
                                         const displayRows = isEditingWorkout && editExercise ? editExercise.setRows : setRows;
                                         const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id) || isEditingWorkout;
                                         return (
-                                          <div className="record-detail-panel recent-record-panel" key={exercise.id}>
+                                           <div
+                                             className="record-detail-panel recent-record-panel"
+                                             key={exercise.id}
+                                             style={{ border: "1px solid var(--line)", borderRadius: 14, padding: 14 }}
+                                           >
                                             <button
                                               className="record-summary-toggle"
                                               onClick={() => !isEditingWorkout && setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}
