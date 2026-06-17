@@ -194,6 +194,20 @@ export default function Home() {
   }, [currentWorkoutId, draftReady, workoutName, workoutQueue]);
 
   useEffect(() => {
+    if (!draftReady) return;
+    const persistDrafts = () => {
+      saveTrackerDraft({ exerciseName, sets });
+      saveWorkoutDraft({ workoutName, workoutId: currentWorkoutId || undefined, exercises: workoutQueue.length ? workoutQueue : [blankExercise()] });
+    };
+    window.addEventListener("pagehide", persistDrafts);
+    window.addEventListener("beforeunload", persistDrafts);
+    return () => {
+      window.removeEventListener("pagehide", persistDrafts);
+      window.removeEventListener("beforeunload", persistDrafts);
+    };
+  }, [currentWorkoutId, draftReady, exerciseName, sets, workoutName, workoutQueue]);
+
+  useEffect(() => {
     const query = exerciseName.trim();
     if (!isSupabaseConfigured || query.length < 2) {
       setCatalogSuggestions([]);
@@ -1150,52 +1164,58 @@ export default function Home() {
                                       <button className="btn" onClick={() => saveEditWorkout(workout)}>Save changes</button>
                                     </div>
                                   )}
-                                  {exercises.length ? exercises.map((exercise) => {
-                                    const editExercise = editWorkoutExercises.find((item) => item.id === exercise.id);
-                                    const setRows = exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }];
-                                    const displayRows = isEditingWorkout && editExercise ? editExercise.setRows : setRows;
-                                    const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id) || isEditingWorkout;
-                                    return (
-                                      <div className="workout-exercise-section" key={exercise.id}>
-                                        <button
-                                          className="record-summary-toggle"
-                                          onClick={() => !isEditingWorkout && setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}
-                                        >
-                                          <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
-                                          <span>{isEditingWorkout && editExercise ? <input className="detail-input" value={editExercise.name} onChange={(event) => updateEditWorkoutExercise(exercise.id, { name: event.target.value })} /> : exercise.exercise_name}</span>
-                                          <span>{exercise.sets} {exercise.sets === 1 ? "set" : "sets"} • best {exercise.weight} lbs × {exercise.reps}</span>
-                                        </button>
-                                        {isExerciseExpanded && (
-                                          <>
-                                            <p className="muted">{exercise.volume} lbs volume</p>
-                                            <div className="set-detail-table">
-                                              <div className="set-detail-head">
-                                                <span>Set</span>
-                                                <span>Reps</span>
-                                                <span>Weight</span>
-                                              </div>
-                                              {displayRows.map((set, index) => (
-                                                <div className="set-detail-row" key={`${exercise.id}-${set.set}-${index}`}>
-                                                  <span>{index + 1}</span>
-                                                  {isEditingWorkout ? (
-                                                    <>
-                                                      <input className="detail-input" inputMode="numeric" value={set.reps} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
-                                                      <input className="detail-input" inputMode="decimal" value={set.weight} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
-                                                    </>
-                                                  ) : (
-                                                    <>
-                                                      <span>{set.reps}</span>
-                                                      <span>{set.weight} lbs</span>
-                                                    </>
-                                                  )}
+                                  {exercises.length ? (
+                                    <div className="recent-record-list workout-detail-list">
+                                      {exercises.map((exercise) => {
+                                        const editExercise = editWorkoutExercises.find((item) => item.id === exercise.id);
+                                        const setRows = exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }];
+                                        const displayRows = isEditingWorkout && editExercise ? editExercise.setRows : setRows;
+                                        const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id) || isEditingWorkout;
+                                        return (
+                                          <div className="record-detail-panel recent-record-panel" key={exercise.id}>
+                                            <button
+                                              className="record-summary-toggle"
+                                              onClick={() => !isEditingWorkout && setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}
+                                            >
+                                              <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
+                                              <span>{isEditingWorkout && editExercise ? <input className="detail-input" value={editExercise.name} onChange={(event) => updateEditWorkoutExercise(exercise.id, { name: event.target.value })} /> : exercise.exercise_name}</span>
+                                              <span>{exercise.sets} {exercise.sets === 1 ? "set" : "sets"} • best {exercise.weight} lbs × {exercise.reps}</span>
+                                            </button>
+                                            {isExerciseExpanded && (
+                                              <>
+                                                <div className="record-detail-meta">
+                                                  <span>{exercise.volume} lbs volume</span>
                                                 </div>
-                                              ))}
-                                            </div>
-                                          </>
-                                        )}
-                                      </div>
-                                    );
-                                  }) : <div className="empty">No exercises saved for this workout.</div>}
+                                                <div className="set-detail-table">
+                                                  <div className="set-detail-head">
+                                                    <span>Set</span>
+                                                    <span>Reps</span>
+                                                    <span>Weight</span>
+                                                  </div>
+                                                  {displayRows.map((set, index) => (
+                                                    <div className="set-detail-row" key={`${exercise.id}-${set.set}-${index}`}>
+                                                      <span>{index + 1}</span>
+                                                      {isEditingWorkout ? (
+                                                        <>
+                                                          <input className="detail-input" inputMode="numeric" value={set.reps} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
+                                                          <input className="detail-input" inputMode="decimal" value={set.weight} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
+                                                        </>
+                                                      ) : (
+                                                        <>
+                                                          <span>{set.reps}</span>
+                                                          <span>{set.weight} lbs</span>
+                                                        </>
+                                                      )}
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              </>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : <div className="empty">No exercises saved for this workout.</div>}
                                 </div>
                               </td>
                             </tr>
