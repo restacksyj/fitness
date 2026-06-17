@@ -8,7 +8,6 @@ import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
 import { ArrowLeft, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Search, Trash2, X } from "lucide-react";
 import { isSupabaseConfigured, supabase, type ExerciseCatalogItem, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
-import { getUserKey } from "@/lib/user-key";
 
 const PAGE_SIZE = 10;
 const normalise = (name: string) => name.trim().toLowerCase();
@@ -76,9 +75,15 @@ export default function HistoryPage() {
         const exercise = new URLSearchParams(window.location.search).get("exercise") ?? "";
         setSearch(exercise);
 
-        const key = getUserKey();
-        setUserKey(key);
-        loadHistory(key);
+        async function initAuth() {
+            if (!isSupabaseConfigured) return;
+            const { data } = await supabase.auth.getUser();
+            const user = data.user;
+            if (!user) return;
+            setUserKey(user.id);
+            loadHistory(user.id);
+        }
+        initAuth();
     }, []);
 
     useEffect(() => {

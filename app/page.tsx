@@ -6,10 +6,9 @@ import { format } from "date-fns";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, BrushCleaning, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, GripVertical, Plus, Save, Search, TrendingUp, Trash2, Weight, X } from "lucide-react";
+import { Activity, BrushCleaning, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, GripVertical, LogIn, LogOut, Plus, Save, Search, TrendingUp, Trash2, Weight, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { isSupabaseConfigured, supabase, type BodyWeight, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
-import { getUserKey } from "@/lib/user-key";
 import { blankExercise, blankSet, loadWorkoutDraft, saveWorkoutDraft, type ExerciseDraft, type SetRow } from "@/lib/workout-draft";
 
 type WorkoutWithExercises = Workout & { workout_exercises: WorkoutExercise[] };
@@ -117,6 +116,11 @@ function DateRangePickerField({ from, to, onChange }: { from: string; to: string
 export default function Home() {
   const [activeSection, setActiveSection] = useState<"workouts" | "exercises" | "progress" | "weight">("exercises");
   const [userKey, setUserKey] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authUserEmail, setAuthUserEmail] = useState("");
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMessage, setAuthMessage] = useState("");
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const [exerciseName, setExerciseName] = useState("");
   const [sets, setSets] = useState<SetRow[]>(blankTrackerSets());
   const [workoutName, setWorkoutName] = useState("");
@@ -177,10 +181,36 @@ export default function Home() {
       setCollapsedQueueIds(exercises.map((exercise) => exercise.id));
     }
 
-    const key = getUserKey();
-    setUserKey(key);
-    loadData(key);
-    setDraftReady(true);
+    async function initAuth() {
+      if (!isSupabaseConfigured) {
+        setAuthLoading(false);
+        setDraftReady(true);
+        return;
+      }
+
+      const { data } = await supabase.auth.getUser();
+      const user = data.user;
+      setUserKey(user?.id ?? "");
+      setAuthUserEmail(user?.email ?? "");
+      if (user) await loadData(user.id);
+      setAuthLoading(false);
+      setDraftReady(true);
+    }
+
+    initAuth();
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user;
+      setUserKey(user?.id ?? "");
+      setAuthUserEmail(user?.email ?? "");
+      if (user) loadData(user.id);
+      else {
+        setHistory([]);
+        setRecentWorkouts([]);
+        setBodyWeights([]);
+      }
+    });
+
+    return () => listener.subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
@@ -274,6 +304,27 @@ export default function Home() {
       window.clearTimeout(timeout);
     };
   }, [progressExercise]);
+
+  async function signInWithEmail() {
+    const email = authEmail.trim();
+    if (!email) return alert("Enter your email.");
+    setAuthMessage("");
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.origin },
+    });
+    if (error) return alert(error.message);
+    setAuthMessage("Check your email for the sign-in link.");
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
+    setUserKey("");
+    setAuthUserEmail("");
+    setHistory([]);
+    setRecentWorkouts([]);
+    setBodyWeights([]);
+  }
 
   async function loadData(key = userKey) {
     if (!key || !isSupabaseConfigured) return;
@@ -862,9 +913,16 @@ export default function Home() {
 
   return (
     <main>
-      <header className="hero">
-        <h1>ProgressFit</h1>
-        <p>Track exercises, workouts, and body weight.</p>
+      <header className="hero app-hero">
+        <div>
+          <h1>ProgressFit</h1>
+          <p>Track exercises, workouts, and body weight.</p>
+        </div>
+        {authLoading ? null : authUserEmail ? (
+          <button className="bare-icon-btn hero-auth-btn" aria-label="Sign out" title={authUserEmail} onClick={signOut}><LogOut size={20} /></button>
+        ) : (
+          <button className="bare-icon-btn hero-auth-btn" aria-label="Sign in" onClick={() => setAuthModalOpen(true)}><LogIn size={20} /></button>
+        )}
       </header>
 
       <nav className="top-nav" aria-label="Main sections">
@@ -1380,6 +1438,22 @@ export default function Home() {
           ) : <div className="empty">No weight records found.</div>}
         </section>
       )}
+
+      <Dialog.Root open={authModalOpen} onOpenChange={setAuthModalOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title className="dialog-title">Sign in</Dialog.Title>
+            <Dialog.Description className="dialog-description">Use the same email on iPhone and web to sync your data.</Dialog.Description>
+            <input className="input" type="email" placeholder="Email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} />
+            {authMessage && <p className="muted">{authMessage}</p>}
+            <div className="dialog-actions">
+              <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
+              <button className="btn" onClick={signInWithEmail}>Send link</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <Dialog.Root open={workoutNameModalOpen} onOpenChange={setWorkoutNameModalOpen}>
         <Dialog.Portal>
