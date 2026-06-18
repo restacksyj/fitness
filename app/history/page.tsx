@@ -6,7 +6,7 @@ import { format } from "date-fns";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { ArrowLeft, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Search, Trash2, X } from "lucide-react";
+import { ArrowLeft, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Plus, Search, Trash2, X } from "lucide-react";
 import { isSupabaseConfigured, supabase, type ExerciseCatalogItem, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
 
 const PAGE_SIZE = 10;
@@ -181,16 +181,28 @@ export default function HistoryPage() {
 
     function startEditing(record: WorkoutExercise, rows: WorkoutSetRow[]) {
         setEditingRecordId(record.id);
-        setEditRows(rows.map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight) })));
+        setEditRows(rows.map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight), notes: row.notes ?? "" })));
     }
 
     function updateEditRow(index: number, patch: Partial<WorkoutSetRow>) {
         setEditRows((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
     }
 
+    function addEditRow() {
+        setEditRows((current) => {
+            const previous = current.at(-1);
+            const next = previous ? { ...previous, set: current.length + 1 } : { set: 1, reps: 0, weight: 0, notes: "" };
+            return [...current, next];
+        });
+    }
+
+    function removeEditRow(indexToRemove: number) {
+        setEditRows((current) => current.filter((_, index) => index !== indexToRemove).map((row, index) => ({ ...row, set: index + 1 })));
+    }
+
     async function saveEdit(record: WorkoutExercise) {
         const rows = editRows
-            .map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight) }))
+            .map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight), notes: row.notes?.trim() || undefined }))
             .filter((row) => Number.isFinite(row.reps) && row.reps > 0 && Number.isFinite(row.weight) && row.weight >= 0);
 
         if (!rows.length) return alert("Add at least one valid set.");
@@ -227,14 +239,12 @@ export default function HistoryPage() {
         <main>
             <header className="hero">
                 <h1>Exercise records</h1>
-                <p>All tracked exercise records, paginated 10 at a time.</p>
             </header>
 
             <section className="card stack">
                 <div className="section-title">
                     <div className="history-heading">
                         <Link className="nav-icon" aria-label="Back" href="/"><ArrowLeft size={17} /></Link>
-                        <h2> Records</h2>
                     </div>
                 </div>
 
@@ -300,6 +310,15 @@ export default function HistoryPage() {
                     <>
                         <div className="table-wrap">
                             <table className="records-table">
+                                <colgroup>
+                                    <col style={{ width: 42 }} />
+                                    <col style={{ width: 118 }} />
+                                    <col />
+                                    <col style={{ width: 70 }} />
+                                    <col style={{ width: 112 }} />
+                                    <col style={{ width: 96 }} />
+                                    <col style={{ width: 76 }} />
+                                </colgroup>
                                 <thead>
                                     <tr>
                                         <th></th>
@@ -308,6 +327,7 @@ export default function HistoryPage() {
                                         <th>Sets</th>
                                         <th>Best</th>
                                         <th>Volume</th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -329,10 +349,25 @@ export default function HistoryPage() {
                                                     <td>{record.sets}</td>
                                                     <td>{record.weight} lbs × {record.reps}</td>
                                                     <td>{record.volume} lbs</td>
+                                                    <td>
+                                                        <div className="record-actions">
+                                                            {isEditing ? (
+                                                                <>
+                                                                    <button className="table-toggle" aria-label="Save record" onClick={(event) => { event.stopPropagation(); saveEdit(record); }}><Check size={16} /></button>
+                                                                    <button className="table-toggle" aria-label="Cancel edit" onClick={(event) => { event.stopPropagation(); setEditingRecordId(""); setEditRows([]); }}><X size={16} /></button>
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <button className="table-toggle" aria-label="Edit record" onClick={(event) => { event.stopPropagation(); setExpandedRecordId(record.id); startEditing(record, setRows); }}><Edit3 size={15} /></button>
+                                                                    <button className="table-toggle" aria-label="Delete record" onClick={(event) => { event.stopPropagation(); setPendingDeleteRecord(record); }}><Trash2 size={15} /></button>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    </td>
                                                 </tr>
                                                 {isExpanded && (
                                                     <tr className="record-detail-row">
-                                                        <td colSpan={6}>
+                                                        <td colSpan={7}>
                                                             <div className="record-detail-panel">
                                                                 <div className="record-detail-top">
                                                                     <div className="record-detail-meta">
@@ -340,43 +375,36 @@ export default function HistoryPage() {
                                                                         <span>{record.sets} sets</span>
                                                                         <span>{record.volume} lbs volume</span>
                                                                     </div>
-                                                                    <div className="record-actions">
-                                                                        {isEditing ? (
-                                                                            <>
-                                                                                <button className="table-toggle" aria-label="Save record" onClick={() => saveEdit(record)}><Check size={16} /></button>
-                                                                                <button className="table-toggle" aria-label="Cancel edit" onClick={() => { setEditingRecordId(""); setEditRows([]); }}><X size={16} /></button>
-                                                                            </>
-                                                                        ) : (
-                                                                            <>
-                                                                                <button className="table-toggle" aria-label="Edit record" onClick={() => startEditing(record, setRows)}><Edit3 size={15} /></button>
-                                                                                <button className="table-toggle" aria-label="Delete record" onClick={() => setPendingDeleteRecord(record)}><Trash2 size={15} /></button>
-                                                                            </>
-                                                                        )}
-                                                                    </div>
                                                                 </div>
                                                                 <div className="set-detail-table">
-                                                                    <div className="set-detail-head">
+                                                                    <div className="set-detail-head" style={{ gridTemplateColumns: isEditing ? "0.5fr 1fr 1fr 1.25fr 34px" : "0.6fr 1fr 1fr 1.3fr" }}>
                                                                         <span>Set</span>
                                                                         <span>Reps</span>
                                                                         <span>Weight</span>
+                                                                        <span>Notes</span>
+                                                                        {isEditing && <span></span>}
                                                                     </div>
                                                                     {displayRows.map((set, index) => (
-                                                                        <div className="set-detail-row" key={`${record.id}-${set.set}-${index}`}>
+                                                                        <div className="set-detail-row" style={{ gridTemplateColumns: isEditing ? "0.5fr 1fr 1fr 1.25fr 34px" : "0.6fr 1fr 1fr 1.3fr" }} key={`${record.id}-${set.set}-${index}`}>
                                                                             <span>{index + 1}</span>
                                                                             {isEditing ? (
                                                                                 <>
                                                                                     <input className="detail-input" inputMode="numeric" value={set.reps} onChange={(event) => updateEditRow(index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
                                                                                     <input className="detail-input" inputMode="decimal" value={set.weight} onChange={(event) => updateEditRow(index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
+                                                                                    <input className="detail-input" value={set.notes ?? ""} placeholder="Notes" onChange={(event) => updateEditRow(index, { notes: event.target.value })} />
+                                                                                    <button className="bare-icon-btn" aria-label={`Remove set ${index + 1}`} onClick={() => removeEditRow(index)}><X size={14} /></button>
                                                                                 </>
                                                                             ) : (
                                                                                 <>
                                                                                     <span>{set.reps}</span>
                                                                                     <span>{set.weight} lbs</span>
+                                                                                    <span>{set.notes || "—"}</span>
                                                                                 </>
                                                                             )}
                                                                         </div>
                                                                     ))}
                                                                 </div>
+                                                                {isEditing && <button className="bare-icon-btn" aria-label="Add set" onClick={addEditRow}><Plus size={16} /></button>}
                                                             </div>
                                                         </td>
                                                     </tr>
@@ -388,17 +416,15 @@ export default function HistoryPage() {
                             </table>
                         </div>
 
-                        {totalPages > 1 && (
-                            <div className="pagination">
-                                <button className="btn secondary icon-btn" aria-label="Previous page" disabled={safePage === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>
-                                    <ChevronLeft size={17} />
-                                </button>
-                                <span className="muted">Page {safePage + 1} of {totalPages}</span>
-                                <button className="btn secondary icon-btn" aria-label="Next page" disabled={safePage >= totalPages - 1} onClick={() => setPage((current) => Math.min(totalPages - 1, current + 1))}>
-                                    <ChevronRight size={17} />
-                                </button>
-                            </div>
-                        )}
+                        <div className="pagination">
+                            <button className="btn secondary icon-btn" aria-label="Previous page" disabled={safePage === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>
+                                <ChevronLeft size={17} />
+                            </button>
+                            <span className="muted">Page {safePage + 1} of {totalPages}</span>
+                            <button className="btn secondary icon-btn" aria-label="Next page" disabled={safePage >= totalPages - 1} onClick={() => setPage((current) => Math.min(totalPages - 1, current + 1))}>
+                                <ChevronRight size={17} />
+                            </button>
+                        </div>
                     </>
                 ) : <div className="empty">No records found.</div>}
             </section>

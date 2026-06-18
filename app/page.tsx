@@ -3,7 +3,7 @@
 import Link from "next/link";
 import * as Dialog from "@radix-ui/react-dialog";
 import { format } from "date-fns";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
 import { Activity, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Plus, RefreshCw, Save, Search, SlidersHorizontal, TrendingUp, Trash2, Weight, X } from "lucide-react";
@@ -29,6 +29,8 @@ const todayInputValue = () => new Date().toISOString().slice(0, 10);
 const SECTION_STORAGE_KEY = "progressfit-active-section";
 type ActiveSection = "workouts" | "exercises" | "progress" | "weight";
 const estimateOneRepMax = (weight: number, reps: number) => Math.round(weight * (1 + reps / 30));
+const offlineId = (type: "weight" | "exercise" | "workout", id: number) => `offline-${type}-${id}`;
+const offlineQueueIdFrom = (id: string) => Number(id.split("-").at(-1));
 
 function loadTrackerDraft(): ExerciseTrackerDraft | null {
   if (typeof window === "undefined") return null;
@@ -156,6 +158,7 @@ export default function Home() {
   const [weightPage, setWeightPage] = useState(0);
   const [progressExercise, setProgressExercise] = useState("");
   const [progressHistory, setProgressHistory] = useState<WorkoutExercise[]>([]);
+  const [expandedProgressRecordId, setExpandedProgressRecordId] = useState("");
   const [progressCatalogSuggestions, setProgressCatalogSuggestions] = useState<ExerciseSuggestion[]>([]);
   const [isProgressSearchFocused, setIsProgressSearchFocused] = useState(false);
   const [bodyWeightCount, setBodyWeightCount] = useState(0);
@@ -184,6 +187,7 @@ export default function Home() {
   const [workoutTypeFilter, setWorkoutTypeFilter] = useState<"all" | "workout" | "exercise">("all");
   const [workoutTypeFilterOpen, setWorkoutTypeFilterOpen] = useState(false);
   const [isMobileView, setIsMobileView] = useState(false);
+  const offlineSyncInFlightRef = useRef(false);
 
   useEffect(() => {
     localStorage.setItem(SECTION_STORAGE_KEY, activeSection);
@@ -241,6 +245,8 @@ export default function Home() {
         setHistory([]);
         setRecentWorkouts([]);
         setBodyWeights([]);
+        setBodyWeightHistory([]);
+        setProgressHistory([]);
       }
     });
 
@@ -442,6 +448,8 @@ export default function Home() {
     setHistory([]);
     setRecentWorkouts([]);
     setBodyWeights([]);
+    setBodyWeightHistory([]);
+    setProgressHistory([]);
   }
 
   async function refreshOfflineCount(key = userKey) {
@@ -465,14 +473,12 @@ export default function Home() {
   }
 
   async function updateOfflineQueuedExercise(exercise: ExerciseDraft, name: string, rows: Array<{ set: number; reps: number; weight: number; notes?: string }>) {
-    const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
-    const queued = items.find((item) => {
-      if (item.type !== "save_workout") return false;
-      const payload = item.payload as OfflineWorkoutPayload;
-      return payload.exercises.length === 1 && normalise(payload.exercises[0].name) === normalise(exercise.name);
-    });
-    if (!queued?.id) return false;
-    await offlineDb.queue.update(queued.id, {
+    const queueId = exercise.savedExerciseId ? offlineQueueIdFrom(exercise.savedExerciseId) : NaN;
+    if (!Number.isFinite(queueId)) return false;
+    const queued = await offlineDb.queue.get(queueId);
+    if (queued?.type !== "save_workout") return false;
+
+    await offlineDb.queue.update(queueId, {
       payload: {
         name,
         exercises: [{ name, sets: rows, notes: exercise.notes?.trim() || null, body_weight: currentBodyWeight }],
@@ -491,6 +497,7 @@ export default function Home() {
 
     if (item.type === "save_workout") {
       const payload = item.payload as OfflineWorkoutPayload;
+      if (!payload.exercises.length) return;
       const { data: workout, error: workoutError } = await supabase
         .from("workouts")
         .insert({ user_key: item.userKey, name: payload.name })
@@ -512,12 +519,16 @@ export default function Home() {
       }));
 
       const { error } = await supabase.from("workout_exercises").insert(exercises);
-      if (error) throw error;
+      if (error) {
+        await supabase.from("workouts").delete().eq("id", workout.id).eq("user_key", item.userKey);
+        throw error;
+      }
     }
   }
 
   async function processOfflineQueue(key = userKey) {
-    if (!key || !navigator.onLine || !isSupabaseConfigured || syncingOffline) return;
+    if (!key || !navigator.onLine || !isSupabaseConfigured || offlineSyncInFlightRef.current) return;
+    offlineSyncInFlightRef.current = true;
     setSyncingOffline(true);
     try {
       const items = await offlineDb.queue.where("userKey").equals(key).sortBy("createdAt");
@@ -530,6 +541,7 @@ export default function Home() {
       await loadData(key);
       setWorkoutQueue((prev) => prev.map((exercise) => exercise.savedExerciseId?.startsWith("offline-") ? { ...exercise, savedExerciseId: undefined } : exercise));
     } finally {
+      offlineSyncInFlightRef.current = false;
       setSyncingOffline(false);
     }
   }
@@ -559,7 +571,7 @@ export default function Home() {
       .select("*, workout_exercises(*)")
       .eq("user_key", key)
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(500);
 
     if (error) return console.error(error.message);
     setRecentWorkouts((data ?? []) as WorkoutWithExercises[]);
@@ -896,8 +908,10 @@ export default function Home() {
       .filter((exercise) => exercise.name && exercise.sets.length);
     const title = workoutNameInput.trim() || formatWorkoutName();
 
+    if (!rows.length) return alert("Add at least one unsaved exercise with a valid set before saving a workout.");
+
     if (!navigator.onLine) {
-      await enqueueOffline({
+      const queueId = await enqueueOffline({
         userKey,
         type: "save_workout",
         payload: {
@@ -906,6 +920,7 @@ export default function Home() {
         } satisfies OfflineWorkoutPayload,
       });
       await refreshOfflineCount();
+      setWorkoutQueue((prev) => prev.map((exercise) => rows.some((row) => row.exercise.id === exercise.id) ? { ...exercise, savedExerciseId: offlineId("workout", queueId) } : exercise));
       setWorkoutNameModalOpen(false);
       setToast(`${title} saved offline`);
       setTimeout(() => setToast(""), 2200);
@@ -1068,9 +1083,8 @@ export default function Home() {
     const payload = { user_key: userKey, weight, measured_on: weightDate, notes: weightNotes.trim() || null };
 
     if (editingWeightId.startsWith("offline-")) {
-      const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
-      const queued = items.find((item) => item.type === "save_body_weight" && (item.payload as OfflineBodyWeightPayload).measured_on === weightDate);
-      if (queued?.id) await offlineDb.queue.update(queued.id, { payload: payload satisfies OfflineBodyWeightPayload });
+      const queueId = offlineQueueIdFrom(editingWeightId);
+      if (Number.isFinite(queueId)) await offlineDb.queue.update(queueId, { payload: payload satisfies OfflineBodyWeightPayload });
       setBodyWeights((current) => current.map((row) => row.id === editingWeightId ? { ...row, ...payload } : row));
       setBodyWeightHistory((current) => current.map((row) => row.id === editingWeightId ? { ...row, ...payload } : row).sort((a, b) => a.measured_on.localeCompare(b.measured_on)));
       setEditingWeightId("");
@@ -1083,9 +1097,9 @@ export default function Home() {
     }
 
     if (!navigator.onLine && !editingWeightId) {
-      await enqueueOffline({ userKey, type: "save_body_weight", payload: payload satisfies OfflineBodyWeightPayload });
+      const queueId = await enqueueOffline({ userKey, type: "save_body_weight", payload: payload satisfies OfflineBodyWeightPayload });
       await refreshOfflineCount();
-      const offlineRow = { id: `offline-${Date.now()}`, created_at: new Date().toISOString(), ...payload };
+      const offlineRow = { id: offlineId("weight", queueId), created_at: new Date().toISOString(), ...payload };
       setBodyWeights((current) => [offlineRow, ...current].slice(0, WEIGHT_PAGE_SIZE));
       setBodyWeightHistory((current) => [...current, offlineRow].sort((a, b) => a.measured_on.localeCompare(b.measured_on)));
       setBodyWeightCount((count) => count + 1);
@@ -1122,9 +1136,8 @@ export default function Home() {
   async function confirmDeleteWeight() {
     if (!pendingDeleteWeight) return;
     if (pendingDeleteWeight.id.startsWith("offline-")) {
-      const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
-      const queued = items.find((item) => item.type === "save_body_weight" && (item.payload as OfflineBodyWeightPayload).measured_on === pendingDeleteWeight.measured_on);
-      if (queued?.id) await offlineDb.queue.delete(queued.id);
+      const queueId = offlineQueueIdFrom(pendingDeleteWeight.id);
+      if (Number.isFinite(queueId)) await offlineDb.queue.delete(queueId);
       setBodyWeights((current) => current.filter((row) => row.id !== pendingDeleteWeight.id));
       setBodyWeightHistory((current) => current.filter((row) => row.id !== pendingDeleteWeight.id));
       setBodyWeightCount((count) => Math.max(0, count - 1));
@@ -1161,6 +1174,13 @@ export default function Home() {
 
     setSavingExerciseId(exercise.id);
 
+    if (exercise.savedExerciseId?.startsWith("offline-workout-")) {
+      setSavingExerciseId("");
+      setToast(`${name} is already queued in an offline workout`);
+      setTimeout(() => setToast(""), 2200);
+      return;
+    }
+
     if (exercise.savedExerciseId?.startsWith("offline-")) {
       const updated = await updateOfflineQueuedExercise(exercise, name, rows);
       setSavingExerciseId("");
@@ -1175,7 +1195,7 @@ export default function Home() {
     }
 
     if (!navigator.onLine && !exercise.savedExerciseId) {
-      await enqueueOffline({
+      const queueId = await enqueueOffline({
         userKey,
         type: "save_workout",
         payload: {
@@ -1185,7 +1205,7 @@ export default function Home() {
       });
       await refreshOfflineCount();
       setSavingExerciseId("");
-      setWorkoutQueue((prev) => prev.map((item) => item.id === exercise.id ? { ...item, savedExerciseId: `offline-${Date.now()}` } : item));
+      setWorkoutQueue((prev) => prev.map((item) => item.id === exercise.id ? { ...item, savedExerciseId: offlineId("exercise", queueId) } : item));
       setToast(`${name} saved offline`);
       setTimeout(() => setToast(""), 2200);
       return;
@@ -1581,7 +1601,7 @@ export default function Home() {
           <div className="workout-filters">
             <div className="input-icon-wrap workout-search-field">
               <Search className="input-icon" size={17} />
-              <input className="input with-icon" style={{ paddingRight: 82 }} placeholder="Search workouts or exercises" value={workoutSearch} onChange={(event) => { setWorkoutSearch(event.target.value); setWorkoutPage(0); }} />
+              <input className="input with-icon" style={{ paddingRight: 82 }} placeholder="Search workout name or included exercise" value={workoutSearch} onChange={(event) => { setWorkoutSearch(event.target.value); setWorkoutPage(0); }} />
               <div style={{ position: "absolute", right: 42, top: "50%", transform: "translateY(-50%)" }}>
                 <DateRangePickerField
                   compact
@@ -1821,13 +1841,11 @@ export default function Home() {
                   </tbody>
                 </table>
               </div>
-              {workoutTotalPages > 1 && (
-                <div className="pagination">
-                  <button className="btn secondary icon-btn" aria-label="Previous workout page" disabled={safeWorkoutPage === 0} onClick={() => setWorkoutPage((current) => Math.max(0, current - 1))}><ChevronLeft size={17} /></button>
-                  <span className="muted">Page {safeWorkoutPage + 1} of {workoutTotalPages}</span>
-                  <button className="btn secondary icon-btn" aria-label="Next workout page" disabled={safeWorkoutPage >= workoutTotalPages - 1} onClick={() => setWorkoutPage((current) => Math.min(workoutTotalPages - 1, current + 1))}><ChevronRight size={17} /></button>
-                </div>
-              )}
+              <div className="pagination">
+                <button className="btn secondary icon-btn" aria-label="Previous workout page" disabled={safeWorkoutPage === 0} onClick={() => setWorkoutPage((current) => Math.max(0, current - 1))}><ChevronLeft size={17} /></button>
+                <span className="muted">Page {safeWorkoutPage + 1} of {workoutTotalPages}</span>
+                <button className="btn secondary icon-btn" aria-label="Next workout page" disabled={safeWorkoutPage >= workoutTotalPages - 1} onClick={() => setWorkoutPage((current) => Math.min(workoutTotalPages - 1, current + 1))}><ChevronRight size={17} /></button>
+              </div>
             </>
           ) : <div className="empty">No workouts found.</div>}
         </section>
@@ -1953,6 +1971,51 @@ export default function Home() {
                   <Scatter name={`${progressExercise} best`} data={bodyWeightVsExerciseData} fill="var(--chart-1)" />
                 </ScatterChart>
               </ResponsiveContainer>
+            </div>
+          )}
+
+          {progressHistory.length > 0 && (
+            <div className="recent-record-list">
+              <div className="recent-list-header">
+                <span className="muted">Records</span>
+                <Link className="view-all-link" href={`/history?exercise=${encodeURIComponent(progressExercise.trim())}`}>View all</Link>
+              </div>
+              {progressHistory.slice().reverse().slice(0, 10).map((record) => {
+                const isExpanded = expandedProgressRecordId === record.id;
+                const rows = record.set_rows?.length ? record.set_rows : [{ set: 1, reps: record.reps, weight: record.weight }];
+                return (
+                  <div className="record-detail-panel recent-record-panel" key={record.id}>
+                    <button className="record-summary-toggle" onClick={() => setExpandedProgressRecordId(isExpanded ? "" : record.id)}>
+                      <ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={18} />
+                      <span>{new Date(record.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</span>
+                      <span>{record.sets} {record.sets === 1 ? "set" : "sets"} • best {record.weight} lbs × {record.reps}</span>
+                    </button>
+                    {isExpanded && (
+                      <>
+                        <div className="record-detail-meta">
+                          <span>{record.volume} lbs volume</span>
+                        </div>
+                        <div className="set-detail-table">
+                          <div className="set-detail-head" style={{ gridTemplateColumns: "0.6fr 1fr 1fr 1.3fr" }}>
+                            <span>Set</span>
+                            <span>Reps</span>
+                            <span>Weight</span>
+                            <span>Notes</span>
+                          </div>
+                          {rows.map((set) => (
+                            <div className="set-detail-row" style={{ gridTemplateColumns: "0.6fr 1fr 1fr 1.3fr" }} key={`${record.id}-${set.set}`}>
+                              <span>{set.set}</span>
+                              <span>{set.reps}</span>
+                              <span>{set.weight} lbs</span>
+                              <span>{set.notes || "—"}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>
