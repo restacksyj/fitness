@@ -416,12 +416,12 @@ export default function HistoryPage() {
                             </table>
                         </div>
 
-                        <div className="pagination">
-                            <button className="btn secondary icon-btn" aria-label="Previous page" disabled={safePage === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>
+                        <div className="pagination" style={{ flexDirection: "row", justifyContent: "center" }}>
+                            <button className="btn secondary icon-btn" style={{ width: 42, minWidth: 42 }} aria-label="Previous page" disabled={safePage === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>
                                 <ChevronLeft size={17} />
                             </button>
                             <span className="muted">Page {safePage + 1} of {totalPages}</span>
-                            <button className="btn secondary icon-btn" aria-label="Next page" disabled={safePage >= totalPages - 1} onClick={() => setPage((current) => Math.min(totalPages - 1, current + 1))}>
+                            <button className="btn secondary icon-btn" style={{ width: 42, minWidth: 42 }} aria-label="Next page" disabled={safePage >= totalPages - 1} onClick={() => setPage((current) => Math.min(totalPages - 1, current + 1))}>
                                 <ChevronRight size={17} />
                             </button>
                         </div>

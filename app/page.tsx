@@ -1841,10 +1841,10 @@ export default function Home() {
                   </tbody>
                 </table>
               </div>
-              <div className="pagination">
-                <button className="btn secondary icon-btn" aria-label="Previous workout page" disabled={safeWorkoutPage === 0} onClick={() => setWorkoutPage((current) => Math.max(0, current - 1))}><ChevronLeft size={17} /></button>
+              <div className="pagination" style={{ flexDirection: "row", justifyContent: "center" }}>
+                <button className="btn secondary icon-btn" style={{ width: 42, minWidth: 42 }} aria-label="Previous workout page" disabled={safeWorkoutPage === 0} onClick={() => setWorkoutPage((current) => Math.max(0, current - 1))}><ChevronLeft size={17} /></button>
                 <span className="muted">Page {safeWorkoutPage + 1} of {workoutTotalPages}</span>
-                <button className="btn secondary icon-btn" aria-label="Next workout page" disabled={safeWorkoutPage >= workoutTotalPages - 1} onClick={() => setWorkoutPage((current) => Math.min(workoutTotalPages - 1, current + 1))}><ChevronRight size={17} /></button>
+                <button className="btn secondary icon-btn" style={{ width: 42, minWidth: 42 }} aria-label="Next workout page" disabled={safeWorkoutPage >= workoutTotalPages - 1} onClick={() => setWorkoutPage((current) => Math.min(workoutTotalPages - 1, current + 1))}><ChevronRight size={17} /></button>
               </div>
             </>
           ) : <div className="empty">No workouts found.</div>}
@@ -2104,10 +2104,10 @@ export default function Home() {
                 </table>
               </div>
               {weightTotalPages > 1 && (
-                <div className="pagination">
-                  <button className="btn secondary icon-btn" aria-label="Previous weight page" disabled={safeWeightPage === 0} onClick={() => setWeightPage((current) => { const next = Math.max(0, current - 1); loadBodyWeights(userKey, next); return next; })}>‹</button>
+                <div className="pagination" style={{ flexDirection: "row", justifyContent: "center" }}>
+                  <button className="btn secondary icon-btn" style={{ width: 42, minWidth: 42 }} aria-label="Previous weight page" disabled={safeWeightPage === 0} onClick={() => setWeightPage((current) => { const next = Math.max(0, current - 1); loadBodyWeights(userKey, next); return next; })}><ChevronLeft size={17} /></button>
                   <span className="muted">Page {safeWeightPage + 1} of {weightTotalPages}</span>
-                  <button className="btn secondary icon-btn" aria-label="Next weight page" disabled={safeWeightPage >= weightTotalPages - 1} onClick={() => setWeightPage((current) => { const next = Math.min(weightTotalPages - 1, current + 1); loadBodyWeights(userKey, next); return next; })}>›</button>
+                  <button className="btn secondary icon-btn" style={{ width: 42, minWidth: 42 }} aria-label="Next weight page" disabled={safeWeightPage >= weightTotalPages - 1} onClick={() => setWeightPage((current) => { const next = Math.min(weightTotalPages - 1, current + 1); loadBodyWeights(userKey, next); return next; })}><ChevronRight size={17} /></button>
                 </div>
               )}
             </>
