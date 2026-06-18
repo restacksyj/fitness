@@ -6,7 +6,7 @@ import { format } from "date-fns";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, BrushCleaning, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, GripVertical, LogIn, LogOut, Plus, RefreshCw, Save, Search, SlidersHorizontal, TrendingUp, Trash2, Weight, X } from "lucide-react";
+import { Activity, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Plus, RefreshCw, Save, Search, SlidersHorizontal, TrendingUp, Trash2, Weight, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
@@ -22,12 +22,13 @@ type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on:
 const TRACKER_DRAFT_KEY = "progressfit-exercise-tracker-draft";
 const formatWorkoutName = (date = new Date()) => date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 const normalise = (name: string) => name.trim().toLowerCase();
-const blankTrackerSets = () => [blankSet(), blankSet(), blankSet()];
+const blankTrackerSets = () => [blankSet()];
 const PAGE_SIZE = 10;
 const WEIGHT_PAGE_SIZE = 10;
 const todayInputValue = () => new Date().toISOString().slice(0, 10);
 const SECTION_STORAGE_KEY = "progressfit-active-section";
 type ActiveSection = "workouts" | "exercises" | "progress" | "weight";
+const estimateOneRepMax = (weight: number, reps: number) => Math.round(weight * (1 + reps / 30));
 
 function loadTrackerDraft(): ExerciseTrackerDraft | null {
   if (typeof window === "undefined") return null;
@@ -141,6 +142,7 @@ export default function Home() {
   const [selectedExerciseMeta, setSelectedExerciseMeta] = useState<ExerciseSuggestion | null>(null);
   const [recentWorkouts, setRecentWorkouts] = useState<WorkoutWithExercises[]>([]);
   const [bodyWeights, setBodyWeights] = useState<BodyWeight[]>([]);
+  const [bodyWeightHistory, setBodyWeightHistory] = useState<BodyWeight[]>([]);
   const [workoutSearch, setWorkoutSearch] = useState("");
   const [workoutDateFrom, setWorkoutDateFrom] = useState("");
   const [workoutDateTo, setWorkoutDateTo] = useState("");
@@ -153,6 +155,7 @@ export default function Home() {
   const [weightNotes, setWeightNotes] = useState("");
   const [weightPage, setWeightPage] = useState(0);
   const [progressExercise, setProgressExercise] = useState("");
+  const [progressHistory, setProgressHistory] = useState<WorkoutExercise[]>([]);
   const [progressCatalogSuggestions, setProgressCatalogSuggestions] = useState<ExerciseSuggestion[]>([]);
   const [isProgressSearchFocused, setIsProgressSearchFocused] = useState(false);
   const [bodyWeightCount, setBodyWeightCount] = useState(0);
@@ -162,6 +165,7 @@ export default function Home() {
   const [workoutNameModalOpen, setWorkoutNameModalOpen] = useState(false);
   const [workoutNameInput, setWorkoutNameInput] = useState(formatWorkoutName());
   const [pendingDeleteWorkout, setPendingDeleteWorkout] = useState<WorkoutWithExercises | null>(null);
+  const [pendingRemoveExercise, setPendingRemoveExercise] = useState<ExerciseDraft | null>(null);
   const [selectedWorkoutId, setSelectedWorkoutId] = useState("");
   const [expandedWorkoutExerciseIds, setExpandedWorkoutExerciseIds] = useState<string[]>([]);
   const [isExerciseSearchFocused, setIsExerciseSearchFocused] = useState(false);
@@ -179,10 +183,19 @@ export default function Home() {
   const [syncingOffline, setSyncingOffline] = useState(false);
   const [workoutTypeFilter, setWorkoutTypeFilter] = useState<"all" | "workout" | "exercise">("all");
   const [workoutTypeFilterOpen, setWorkoutTypeFilterOpen] = useState(false);
+  const [isMobileView, setIsMobileView] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(SECTION_STORAGE_KEY, activeSection);
   }, [activeSection]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 640px)");
+    const update = () => setIsMobileView(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     const trackerDraft = loadTrackerDraft();
@@ -368,6 +381,39 @@ export default function Home() {
     };
   }, [progressExercise]);
 
+  useEffect(() => {
+    const query = progressExercise.trim();
+    if (!userKey || !isSupabaseConfigured || !query) {
+      setProgressHistory([]);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = window.setTimeout(async () => {
+      const { data, error } = await supabase
+        .from("workout_exercises")
+        .select("*")
+        .eq("user_key", userKey)
+        .ilike("exercise_name", query)
+        .order("created_at", { ascending: true })
+        .limit(200);
+
+      if (cancelled) return;
+      if (error) {
+        console.error(error.message);
+        setProgressHistory([]);
+        return;
+      }
+
+      setProgressHistory((data ?? []) as WorkoutExercise[]);
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [progressExercise, userKey]);
+
   async function signInWithEmail() {
     const email = authEmail.trim();
     if (!email || !authPassword) return alert("Enter your email and password.");
@@ -435,17 +481,6 @@ export default function Home() {
     return true;
   }
 
-  async function deleteOfflineQueuedExercise(exercise: ExerciseDraft) {
-    const items = await offlineDb.queue.where("userKey").equals(userKey).toArray();
-    const queued = items.find((item) => {
-      if (item.type !== "save_workout") return false;
-      const payload = item.payload as OfflineWorkoutPayload;
-      return payload.exercises.length === 1 && normalise(payload.exercises[0].name) === normalise(exercise.name);
-    });
-    if (queued?.id) await offlineDb.queue.delete(queued.id);
-    await refreshOfflineCount();
-  }
-
   async function executeOfflineItem(item: OfflineQueueItem) {
     if (item.type === "save_body_weight") {
       const payload = item.payload as OfflineBodyWeightPayload;
@@ -501,7 +536,7 @@ export default function Home() {
 
   async function loadData(key = userKey) {
     if (!key || !isSupabaseConfigured) return;
-    await Promise.all([loadHistory(key), loadRecentWorkouts(key), loadBodyWeights(key)]);
+    await Promise.all([loadHistory(key), loadRecentWorkouts(key), loadBodyWeights(key), loadBodyWeightHistory(key)]);
   }
 
   async function loadHistory(key = userKey) {
@@ -546,8 +581,21 @@ export default function Home() {
     setBodyWeightCount(count ?? 0);
   }
 
+  async function loadBodyWeightHistory(key = userKey) {
+    if (!key || !isSupabaseConfigured) return;
+    const { data, error } = await supabase
+      .from("body_weights")
+      .select("*")
+      .eq("user_key", key)
+      .order("measured_on", { ascending: true })
+      .limit(365);
+
+    if (error) return console.error(error.message);
+    setBodyWeightHistory((data ?? []) as BodyWeight[]);
+  }
+
   const exerciseNames = useMemo(() => {
-    return Array.from(new Set(history.map((h) => h.exercise_name))).sort((a, b) => a.localeCompare(b));
+    return Array.from(new Set(history.map((h) => h.exercise_name)));
   }, [history]);
 
   const exerciseSuggestions = useMemo(() => {
@@ -555,7 +603,6 @@ export default function Home() {
     if (!q) return [];
 
     const suggestions = new Map<string, ExerciseSuggestion>();
-    catalogSuggestions.forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
     exerciseNames
       .filter((name) => normalise(name).includes(q) && normalise(name) !== q)
       .forEach((name) => {
@@ -564,6 +611,10 @@ export default function Home() {
           suggestions.set(key, { id: key, name, category: "Recent", muscles: [], equipment: [], image_url: null, source: "history" });
         }
       });
+    catalogSuggestions.forEach((exercise) => {
+      const key = normalise(exercise.name);
+      if (!suggestions.has(key)) suggestions.set(key, exercise);
+    });
 
     return Array.from(suggestions.values()).slice(0, 8);
   }, [catalogSuggestions, exerciseName, exerciseNames]);
@@ -595,23 +646,49 @@ export default function Home() {
   const safeWorkoutPage = Math.min(workoutPage, workoutTotalPages - 1);
   const workoutRows = filteredWorkouts.slice(safeWorkoutPage * PAGE_SIZE, safeWorkoutPage * PAGE_SIZE + PAGE_SIZE);
   const selectedWorkout = recentWorkouts.find((workout) => workout.id === selectedWorkoutId);
+  const hasUnsavedWorkoutExercises = workoutQueue.some((exercise) => !exercise.savedExerciseId);
   const weightTotalPages = Math.max(1, Math.ceil(bodyWeightCount / WEIGHT_PAGE_SIZE));
   const safeWeightPage = Math.min(weightPage, weightTotalPages - 1);
   const weightRows = bodyWeights;
   const currentBodyWeight = bodyWeights[0]?.weight ?? null;
+  const weightChartData = useMemo(() => bodyWeightHistory.map((row) => ({
+    date: new Date(`${row.measured_on}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    measuredOn: row.measured_on,
+    weight: Number(row.weight),
+    notes: row.notes,
+  })).filter((row) => Number.isFinite(row.weight)), [bodyWeightHistory]);
+  const weightSummary = useMemo(() => {
+    if (!weightChartData.length) return null;
+    const latest = weightChartData.at(-1)!;
+    const previous = weightChartData.length > 1 ? weightChartData.at(-2)! : null;
+    const first = weightChartData[0];
+    const lowest = weightChartData.reduce((min, row) => row.weight < min.weight ? row : min, first);
+    const highest = weightChartData.reduce((max, row) => row.weight > max.weight ? row : max, first);
+    return {
+      latest,
+      previousChange: previous ? Number((latest.weight - previous.weight).toFixed(1)) : 0,
+      totalChange: Number((latest.weight - first.weight).toFixed(1)),
+      lowest,
+      highest,
+      entries: weightChartData.length,
+    };
+  }, [weightChartData]);
 
   const progressSuggestions = useMemo(() => {
     const q = normalise(progressExercise);
     if (!q) return [];
 
     const suggestions = new Map<string, ExerciseSuggestion>();
-    progressCatalogSuggestions.forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
     exerciseNames
       .filter((name) => normalise(name).includes(q))
       .forEach((name) => {
         const key = normalise(name);
         if (!suggestions.has(key)) suggestions.set(key, { id: key, name, category: "Recent", muscles: [], equipment: [], image_url: null, source: "history" });
       });
+    progressCatalogSuggestions.forEach((exercise) => {
+      const key = normalise(exercise.name);
+      if (!suggestions.has(key)) suggestions.set(key, exercise);
+    });
 
     return Array.from(suggestions.values()).slice(0, 8);
   }, [exerciseNames, progressCatalogSuggestions, progressExercise]);
@@ -619,27 +696,81 @@ export default function Home() {
   const progressData = useMemo(() => {
     const key = normalise(progressExercise);
     if (!key) return [];
-    return history
+
+    const grouped = new Map<string, {
+      date: string;
+      sortKey: string;
+      bestWeight: number;
+      bestReps: number;
+      estimatedOneRepMax: number;
+      volume: number;
+      sessions: number;
+      bestSet: string;
+    }>();
+
+    progressHistory
       .filter((record) => normalise(record.exercise_name) === key)
-      .slice()
-      .reverse()
-      .map((record) => ({
-        date: new Date(record.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-        bestWeight: Number(record.weight),
-        bestReps: Number(record.reps),
-        volume: Number(record.volume),
-      }));
-  }, [history, progressExercise]);
+      .forEach((record) => {
+        const sortKey = record.created_at.slice(0, 10);
+        const setRows = record.set_rows?.length ? record.set_rows : [{ set: 1, reps: record.reps, weight: record.weight }];
+        const bestSet = setRows.reduce<{ weight: number; reps: number; e1rm: number } | null>((best, set) => {
+          const weight = Number(set.weight);
+          const reps = Number(set.reps);
+          const e1rm = estimateOneRepMax(weight, reps);
+          if (!Number.isFinite(weight) || !Number.isFinite(reps)) return best;
+          if (!best || e1rm > best.e1rm || (e1rm === best.e1rm && weight > best.weight)) return { weight, reps, e1rm };
+          return best;
+        }, null) ?? { weight: Number(record.weight), reps: Number(record.reps), e1rm: estimateOneRepMax(Number(record.weight), Number(record.reps)) };
+        const existing = grouped.get(sortKey);
+        const volume = Number(record.volume) || setRows.reduce((sum, set) => sum + Number(set.reps) * Number(set.weight), 0);
+
+        if (!existing) {
+          grouped.set(sortKey, {
+            date: new Date(record.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+            sortKey,
+            bestWeight: bestSet.weight,
+            bestReps: bestSet.reps,
+            estimatedOneRepMax: bestSet.e1rm,
+            volume,
+            sessions: 1,
+            bestSet: `${bestSet.weight} lbs × ${bestSet.reps}`,
+          });
+          return;
+        }
+
+        existing.volume += volume;
+        existing.sessions += 1;
+        if (bestSet.e1rm > existing.estimatedOneRepMax || (bestSet.e1rm === existing.estimatedOneRepMax && bestSet.weight > existing.bestWeight)) {
+          existing.bestWeight = bestSet.weight;
+          existing.bestReps = bestSet.reps;
+          existing.estimatedOneRepMax = bestSet.e1rm;
+          existing.bestSet = `${bestSet.weight} lbs × ${bestSet.reps}`;
+        }
+      });
+
+    return Array.from(grouped.values()).sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  }, [progressHistory, progressExercise]);
+
+  const progressSummary = useMemo(() => {
+    if (!progressData.length) return null;
+    const latest = progressData.at(-1)!;
+    const previous = progressData.length > 1 ? progressData.at(-2)! : null;
+    const allTimeBest = progressData.reduce((best, row) => row.estimatedOneRepMax > best.estimatedOneRepMax ? row : best, progressData[0]);
+    return {
+      latest,
+      allTimeBest,
+      totalSessions: progressData.reduce((sum, row) => sum + row.sessions, 0),
+      e1rmChange: previous ? latest.estimatedOneRepMax - previous.estimatedOneRepMax : 0,
+    };
+  }, [progressData]);
 
   const bodyWeightVsExerciseData = useMemo(() => {
     const key = normalise(progressExercise);
     if (!key) return [];
 
     const bodyWeightsByDate = new Map(bodyWeights.map((row) => [row.measured_on, Number(row.weight)]));
-    return history
+    return progressHistory
       .filter((record) => normalise(record.exercise_name) === key)
-      .slice()
-      .reverse()
       .map((record) => {
         const dateKey = record.created_at.slice(0, 10);
         return {
@@ -649,7 +780,7 @@ export default function Home() {
         };
       })
       .filter((row) => Number.isFinite(row.bodyWeight) && Number.isFinite(row.exerciseWeight));
-  }, [bodyWeights, history, progressExercise]);
+  }, [bodyWeights, progressHistory, progressExercise]);
 
   function lastBestForSet(exerciseName: string, setNumber: number) {
     const record = history.find((item) => normalise(item.exercise_name) === normalise(exerciseName));
@@ -747,6 +878,7 @@ export default function Home() {
     if (!workoutQueue.length) return alert("Add at least one exercise before saving a workout.");
 
     const rows = workoutQueue
+      .filter((exercise) => !exercise.savedExerciseId)
       .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets) }))
       .filter((exercise) => exercise.name && exercise.sets.length);
 
@@ -759,6 +891,7 @@ export default function Home() {
 
   async function confirmSaveWorkout() {
     const rows = workoutQueue
+      .filter((exercise) => !exercise.savedExerciseId)
       .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets) }))
       .filter((exercise) => exercise.name && exercise.sets.length);
     const title = workoutNameInput.trim() || formatWorkoutName();
@@ -826,6 +959,7 @@ export default function Home() {
         set: index + 1,
         reps: Number(set.reps),
         weight: Number(set.weight),
+        notes: set.notes ?? "",
       })),
     })));
   }
@@ -847,11 +981,31 @@ export default function Home() {
     } : exercise));
   }
 
+  function addEditWorkoutSet(exerciseId: string) {
+    setEditWorkoutExercises((prev) => prev.map((exercise) => {
+      if (exercise.id !== exerciseId) return exercise;
+      const previous = exercise.setRows.at(-1);
+      const nextSet = previous ? { ...previous, set: exercise.setRows.length + 1 } : { set: 1, reps: 0, weight: 0 };
+      return { ...exercise, setRows: [...exercise.setRows, nextSet] };
+    }));
+  }
+
+  function removeEditWorkoutSet(exerciseId: string, setIndex: number) {
+    setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? {
+      ...exercise,
+      setRows: exercise.setRows.filter((_, index) => index !== setIndex).map((set, index) => ({ ...set, set: index + 1 })),
+    } : exercise));
+  }
+
+  function removeEditWorkoutExercise(exerciseId: string) {
+    setEditWorkoutExercises((prev) => prev.filter((exercise) => exercise.id !== exerciseId));
+  }
+
   async function saveEditWorkout(workout: WorkoutWithExercises) {
     const workoutName = editWorkoutName.trim() || formatWorkoutName(new Date(workout.created_at));
     const exerciseUpdates = editWorkoutExercises.map((exercise) => {
       const rows = exercise.setRows
-        .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: Number(set.weight) }))
+        .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: Number(set.weight), notes: set.notes?.trim() || undefined }))
         .filter((set) => Number.isFinite(set.reps) && set.reps > 0 && Number.isFinite(set.weight) && set.weight >= 0);
       return { ...exercise, setRows: rows };
     }).filter((exercise) => exercise.name.trim() && exercise.setRows.length);
@@ -860,6 +1014,13 @@ export default function Home() {
 
     const { error: workoutError } = await supabase.from("workouts").update({ name: workoutName }).eq("id", workout.id).eq("user_key", userKey);
     if (workoutError) return alert(workoutError.message);
+
+    const keptExerciseIds = new Set(exerciseUpdates.map((exercise) => exercise.id));
+    const deletedExerciseIds = (workout.workout_exercises ?? []).map((exercise) => exercise.id).filter((id) => !keptExerciseIds.has(id));
+    if (deletedExerciseIds.length) {
+      const { error } = await supabase.from("workout_exercises").delete().in("id", deletedExerciseIds).eq("user_key", userKey);
+      if (error) return alert(error.message);
+    }
 
     for (const exercise of exerciseUpdates) {
       const payload = {
@@ -911,6 +1072,7 @@ export default function Home() {
       const queued = items.find((item) => item.type === "save_body_weight" && (item.payload as OfflineBodyWeightPayload).measured_on === weightDate);
       if (queued?.id) await offlineDb.queue.update(queued.id, { payload: payload satisfies OfflineBodyWeightPayload });
       setBodyWeights((current) => current.map((row) => row.id === editingWeightId ? { ...row, ...payload } : row));
+      setBodyWeightHistory((current) => current.map((row) => row.id === editingWeightId ? { ...row, ...payload } : row).sort((a, b) => a.measured_on.localeCompare(b.measured_on)));
       setEditingWeightId("");
       setWeightValue("");
       setWeightNotes("");
@@ -923,7 +1085,9 @@ export default function Home() {
     if (!navigator.onLine && !editingWeightId) {
       await enqueueOffline({ userKey, type: "save_body_weight", payload: payload satisfies OfflineBodyWeightPayload });
       await refreshOfflineCount();
-      setBodyWeights((current) => [{ id: `offline-${Date.now()}`, created_at: new Date().toISOString(), ...payload }, ...current].slice(0, WEIGHT_PAGE_SIZE));
+      const offlineRow = { id: `offline-${Date.now()}`, created_at: new Date().toISOString(), ...payload };
+      setBodyWeights((current) => [offlineRow, ...current].slice(0, WEIGHT_PAGE_SIZE));
+      setBodyWeightHistory((current) => [...current, offlineRow].sort((a, b) => a.measured_on.localeCompare(b.measured_on)));
       setBodyWeightCount((count) => count + 1);
       setWeightValue("");
       setWeightNotes("");
@@ -943,7 +1107,7 @@ export default function Home() {
     setWeightDate(todayInputValue());
     setEditingWeightId("");
     setWeightPage(0);
-    await loadBodyWeights(userKey, 0);
+    await Promise.all([loadBodyWeights(userKey, 0), loadBodyWeightHistory(userKey)]);
     setToast(editingWeightId ? "Weight updated" : "Weight saved");
     setTimeout(() => setToast(""), 2200);
   }
@@ -962,12 +1126,13 @@ export default function Home() {
       const queued = items.find((item) => item.type === "save_body_weight" && (item.payload as OfflineBodyWeightPayload).measured_on === pendingDeleteWeight.measured_on);
       if (queued?.id) await offlineDb.queue.delete(queued.id);
       setBodyWeights((current) => current.filter((row) => row.id !== pendingDeleteWeight.id));
+      setBodyWeightHistory((current) => current.filter((row) => row.id !== pendingDeleteWeight.id));
       setBodyWeightCount((count) => Math.max(0, count - 1));
       await refreshOfflineCount();
     } else {
       const { error } = await supabase.from("body_weights").delete().eq("id", pendingDeleteWeight.id).eq("user_key", userKey);
       if (error) return alert(error.message);
-      await loadBodyWeights();
+      await Promise.all([loadBodyWeights(), loadBodyWeightHistory()]);
     }
 
     setPendingDeleteWeight(null);
@@ -1074,7 +1239,7 @@ export default function Home() {
     setTimeout(() => setToast(""), 2200);
   }
 
-  async function saveExercises(rows: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number }> }>, title: string) {
+  async function saveExercises(rows: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }> }>, title: string) {
     setSaving(true);
     const { data: workout, error: workoutError } = await supabase
       .from("workouts")
@@ -1130,7 +1295,12 @@ export default function Home() {
   }
 
   function addQueuedSet(exerciseId: string) {
-    setWorkoutQueue((prev) => prev.map((exercise) => exercise.id === exerciseId ? { ...exercise, sets: [...exercise.sets, blankSet()] } : exercise));
+    setWorkoutQueue((prev) => prev.map((exercise) => {
+      if (exercise.id !== exerciseId) return exercise;
+      const previous = exercise.sets.at(-1);
+      const nextSet = previous ? { ...previous, id: crypto.randomUUID() } : blankSet();
+      return { ...exercise, sets: [...exercise.sets, nextSet] };
+    }));
   }
 
   function reorderQueuedSets(exerciseId: string, fromId: string, toId: string) {
@@ -1153,22 +1323,10 @@ export default function Home() {
     setWorkoutQueue((prev) => prev.map((exercise) => exercise.id === exerciseId ? { ...exercise, sets: exercise.sets.filter((set) => set.id !== setId) } : exercise));
   }
 
-  async function removeQueuedExercise(exercise: ExerciseDraft) {
-    const message = exercise.savedExerciseId
-      ? `Delete ${exercise.name} from your records? This cannot be undone.`
-      : `Remove ${exercise.name} from this screen?`;
-    if (!confirm(message)) return;
-
-    if (exercise.savedExerciseId?.startsWith("offline-")) {
-      await deleteOfflineQueuedExercise(exercise);
-    } else if (exercise.savedExerciseId) {
-      const { error } = await supabase.from("workout_exercises").delete().eq("id", exercise.savedExerciseId).eq("user_key", userKey);
-      if (error) return alert(error.message);
-      await loadData();
-    }
-
+  function removeQueuedExercise(exercise: ExerciseDraft) {
     setWorkoutQueue((prev) => prev.filter((item) => item.id !== exercise.id));
     setCollapsedQueueIds((prev) => prev.filter((collapsedId) => collapsedId !== exercise.id));
+    setPendingRemoveExercise(null);
   }
 
   return (
@@ -1188,11 +1346,11 @@ export default function Home() {
         </div>
       </header>
 
-      <nav className="top-nav" aria-label="Main sections">
-        <button className={activeSection === "workouts" ? "active" : ""} onClick={() => setActiveSection("workouts")}>Workouts</button>
-        <button className={activeSection === "exercises" ? "active" : ""} onClick={() => setActiveSection("exercises")}>Exercises</button>
-        <button className={activeSection === "progress" ? "active" : ""} onClick={() => setActiveSection("progress")}>Progress</button>
-        <button className={activeSection === "weight" ? "active" : ""} onClick={() => setActiveSection("weight")}>Weight</button>
+      <nav className="top-nav" aria-label="Main sections" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6 }}>
+        <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "workouts" ? "active" : ""} onClick={() => setActiveSection("workouts")}>Workouts</button>
+        <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "exercises" ? "active" : ""} onClick={() => setActiveSection("exercises")}>Exercises</button>
+        <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "progress" ? "active" : ""} onClick={() => setActiveSection("progress")}>Progress</button>
+        <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "weight" ? "active" : ""} onClick={() => setActiveSection("weight")}>Weight</button>
       </nav>
 
       {(!isOnline || offlineQueueCount > 0) && (
@@ -1266,8 +1424,8 @@ export default function Home() {
           <div className="section-title">
             <h2><Activity size={18} /> Exercise tracker</h2>
             <div className="row action-row">
-              <button className="bare-icon-btn" aria-label="Clear all" onClick={() => setClearDraftModalOpen(true)}><BrushCleaning size={18} /></button>
-              <button className="bare-icon-btn" aria-label="Save to workout" disabled={saving} onClick={saveWorkoutFromTrackers}><Save size={18} /></button>
+              <button className="bare-icon-btn" aria-label="Clear all" onClick={() => setClearDraftModalOpen(true)}><Eraser size={18} /></button>
+              <button className="bare-icon-btn" aria-label="Save to workout" disabled={saving || !hasUnsavedWorkoutExercises} onClick={saveWorkoutFromTrackers}><Save size={18} /></button>
             </div>
           </div>
           <div className="workout-list">
@@ -1294,7 +1452,7 @@ export default function Home() {
                         <small>{meta || `${rows.length} ${rows.length === 1 ? "set" : "sets"} • ${volume} lbs volume`}</small>
                       </span>
                     </button>
-                    <button className="btn danger icon-btn" aria-label={`Remove ${exercise.name}`} onClick={() => removeQueuedExercise(exercise)}><Trash2 size={16} /></button>
+                    <button className="btn danger icon-btn" aria-label={`Remove ${exercise.name}`} onClick={() => setPendingRemoveExercise(exercise)}><Trash2 size={16} /></button>
                   </div>
                   {!isCollapsed && (
                     <div className="workout-exercise-body">
@@ -1325,16 +1483,18 @@ export default function Home() {
                                       <span>{record.volume} lbs volume</span>
                                     </div>
                                     <div className="set-detail-table">
-                                      <div className="set-detail-head">
+                                      <div className="set-detail-head" style={{ gridTemplateColumns: "0.6fr 1fr 1fr 1.3fr" }}>
                                         <span>Set</span>
                                         <span>Reps</span>
                                         <span>Weight</span>
+                                        <span>Notes</span>
                                       </div>
                                       {(record.set_rows?.length ? record.set_rows : [{ set: 1, reps: record.reps, weight: record.weight }]).map((set) => (
-                                        <div className="set-detail-row" key={`${record.id}-${set.set}`}>
+                                        <div className="set-detail-row" style={{ gridTemplateColumns: "0.6fr 1fr 1fr 1.3fr" }} key={`${record.id}-${set.set}`}>
                                           <span>{set.set}</span>
                                           <span>{set.reps}</span>
                                           <span>{set.weight} lbs</span>
+                                          <span>{set.notes || "—"}</span>
                                         </div>
                                       ))}
                                     </div>
@@ -1346,11 +1506,11 @@ export default function Home() {
                         </div>
                       )}
                       <div className="queued-set-table">
-                        <div className="set-grid queued-set-grid table-head" aria-hidden="true">
+                        <div className="set-grid queued-set-grid table-head" style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(76px,1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 430 }} aria-hidden="true">
                           <span></span>
-                          <span>Sets</span>
-                          <span>Reps</span>
+                          <span>Set</span>
                           <span>Weight</span>
+                          <span>Reps</span>
                           <span>Last best</span>
                           <span>Notes</span>
                           <span></span>
@@ -1358,6 +1518,7 @@ export default function Home() {
                         {exercise.sets.map((set, index) => (
                           <div
                             className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
+                            style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(76px,1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 430 }}
                             key={set.id}
                             onDragOver={(event) => {
                               event.preventDefault();
@@ -1373,6 +1534,7 @@ export default function Home() {
                           >
                             <button
                               className="drag-handle"
+                              style={{ width: 22, minWidth: 22, height: 30, border: 0, background: "transparent" }}
                               draggable
                               aria-label={`Drag ${exercise.name} set ${index + 1} to reorder`}
                               onDragStart={(event) => {
@@ -1385,14 +1547,14 @@ export default function Home() {
                                 setDragOverSetId("");
                               }}
                             >
-                              <GripVertical size={16} />
+                              <GripVertical size={14} />
                             </button>
                             <span className="set-number">{index + 1}</span>
-                            <input className="input" inputMode="numeric" aria-label={`${exercise.name} set ${index + 1} reps`} placeholder="Reps" value={set.reps} onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })} />
                             <input className="input" inputMode="decimal" aria-label={`${exercise.name} set ${index + 1} weight in lbs`} placeholder="lbs" value={set.weight} onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, "") })} />
+                            <input className="input" inputMode="numeric" aria-label={`${exercise.name} set ${index + 1} reps`} placeholder="Reps" value={set.reps} onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })} />
                             <span className="last-best">{lastBestForSet(exercise.name, index + 1)}</span>
                             <input className="input set-notes-input" aria-label={`${exercise.name} set ${index + 1} notes`} placeholder="Notes" value={set.notes ?? ""} onChange={(event) => updateQueuedSet(exercise.id, set.id, { notes: event.target.value })} />
-                            <button className="bare-icon-btn" aria-label={`Remove ${exercise.name} set ${index + 1}`} onClick={() => removeQueuedSet(exercise.id, set.id)}><X size={14} /></button>
+                            <button className="bare-icon-btn" style={{ width: 24, minWidth: 24 }} aria-label={`Remove ${exercise.name} set ${index + 1}`} onClick={() => removeQueuedSet(exercise.id, set.id)}><X size={14} /></button>
                           </div>
                         ))}
                       </div>
@@ -1495,6 +1657,15 @@ export default function Home() {
             <>
               <div className="table-wrap">
                 <table className="records-table">
+                  <colgroup>
+                    <col style={{ width: 42 }} />
+                    <col style={{ width: 118 }} />
+                    <col style={{ width: 84 }} />
+                    <col />
+                    <col style={{ width: 82 }} />
+                    <col style={{ width: 96 }} />
+                    <col style={{ width: 76 }} />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th></th>
@@ -1575,53 +1746,64 @@ export default function Home() {
                                         padding: "10px 8px 12px 20px",
                                       }}
                                     >
-                                      {exercises.map((exercise) => {
+                                      {exercises.filter((exercise) => !isEditingWorkout || editWorkoutExercises.some((item) => item.id === exercise.id)).map((exercise) => {
                                         const editExercise = editWorkoutExercises.find((item) => item.id === exercise.id);
                                         const setRows = exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }];
                                         const displayRows = isEditingWorkout && editExercise ? editExercise.setRows : setRows;
                                         const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id) || isEditingWorkout;
+                                        const summaryRows = displayRows.filter((set) => Number(set.reps) > 0 && Number(set.weight) >= 0);
+                                        const bestRow = summaryRows.reduce<WorkoutSetRow | null>((best, set) => !best || Number(set.weight) > Number(best.weight) ? set : best, null);
                                         return (
                                            <div
                                              className="record-detail-panel recent-record-panel"
                                              key={exercise.id}
                                              style={{ border: "1px solid var(--line)", borderRadius: 14, padding: 14 }}
                                            >
-                                            <button
-                                              className="record-summary-toggle"
-                                              onClick={() => !isEditingWorkout && setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}
-                                            >
-                                              <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
-                                              <span>{isEditingWorkout && editExercise ? <input className="detail-input" value={editExercise.name} onChange={(event) => updateEditWorkoutExercise(exercise.id, { name: event.target.value })} /> : exercise.exercise_name}</span>
-                                              <span>{exercise.sets} {exercise.sets === 1 ? "set" : "sets"} • best {exercise.weight} lbs × {exercise.reps}</span>
-                                            </button>
+                                            <div style={{ display: "grid", gridTemplateColumns: isEditingWorkout ? "1fr auto" : "1fr", gap: 8, alignItems: "center" }}>
+                                              <button
+                                                className="record-summary-toggle"
+                                                onClick={() => !isEditingWorkout && setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}
+                                              >
+                                                <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
+                                                <span>{isEditingWorkout && editExercise ? <input className="detail-input" value={editExercise.name} onChange={(event) => updateEditWorkoutExercise(exercise.id, { name: event.target.value })} /> : exercise.exercise_name}</span>
+                                                <span>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>
+                                              </button>
+                                              {isEditingWorkout && <button className="bare-icon-btn" aria-label={`Delete ${exercise.exercise_name}`} onClick={() => removeEditWorkoutExercise(exercise.id)}><Trash2 size={15} /></button>}
+                                            </div>
                                             {isExerciseExpanded && (
                                               <>
                                                 <div className="record-detail-meta">
                                                   <span>{exercise.volume} lbs volume</span>
                                                 </div>
                                                 <div className="set-detail-table">
-                                                  <div className="set-detail-head">
+                                                  <div className="set-detail-head" style={{ gridTemplateColumns: isEditingWorkout ? "0.5fr 1fr 1fr 1.25fr 34px" : "0.6fr 1fr 1fr 1.3fr" }}>
                                                     <span>Set</span>
                                                     <span>Reps</span>
                                                     <span>Weight</span>
+                                                    <span>Notes</span>
+                                                    {isEditingWorkout && <span></span>}
                                                   </div>
                                                   {displayRows.map((set, index) => (
-                                                    <div className="set-detail-row" key={`${exercise.id}-${set.set}-${index}`}>
+                                                    <div className="set-detail-row" style={{ gridTemplateColumns: isEditingWorkout ? "0.5fr 1fr 1fr 1.25fr 34px" : "0.6fr 1fr 1fr 1.3fr" }} key={`${exercise.id}-${set.set}-${index}`}>
                                                       <span>{index + 1}</span>
                                                       {isEditingWorkout ? (
                                                         <>
                                                           <input className="detail-input" inputMode="numeric" value={set.reps} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
                                                           <input className="detail-input" inputMode="decimal" value={set.weight} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
+                                                          <input className="detail-input" value={set.notes ?? ""} placeholder="Notes" onChange={(event) => updateEditWorkoutSet(exercise.id, index, { notes: event.target.value })} />
+                                                          <button className="bare-icon-btn" aria-label={`Delete ${exercise.exercise_name} set ${index + 1}`} onClick={() => removeEditWorkoutSet(exercise.id, index)}><X size={14} /></button>
                                                         </>
                                                       ) : (
                                                         <>
                                                           <span>{set.reps}</span>
                                                           <span>{set.weight} lbs</span>
+                                                          <span>{set.notes || "—"}</span>
                                                         </>
                                                       )}
                                                     </div>
                                                   ))}
                                                 </div>
+                                                {isEditingWorkout && <button className="bare-icon-btn" aria-label={`Add set to ${exercise.exercise_name}`} onClick={() => addEditWorkoutSet(exercise.id)}><Plus size={16} /></button>}
                                               </>
                                             )}
                                           </div>
@@ -1701,36 +1883,71 @@ export default function Home() {
             )}
           </div>
           {progressData.length ? (
-            <div className="chart-card shadcn-chart">
-              <h3>Exercise trend</h3>
-              <ResponsiveContainer width="100%" height={380}>
-                <LineChart data={progressData} margin={{ top: 16, right: 26, left: 22, bottom: 26 }}>
-                  <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: "var(--muted)" }}>
-                    <Label value="Date" offset={-14} position="insideBottom" fill="var(--muted)" fontSize={12} />
-                  </XAxis>
-                  <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: "var(--muted)" }}>
-                    <Label value="Weight / Volume (lbs)" angle={-90} position="insideLeft" fill="var(--muted)" fontSize={12} />
-                  </YAxis>
-                  <Tooltip formatter={(value, name) => [`${value} lbs`, name]} contentStyle={{ borderRadius: 14, border: "1px solid var(--line)", boxShadow: "0 12px 30px rgba(43,43,43,.12)" }} />
-                  <Line type="monotone" dataKey="bestWeight" name="Best weight" stroke="var(--chart-1)" strokeWidth={2.5} dot={{ r: 3 }} />
-                  <Line type="monotone" dataKey="volume" name="Volume" stroke="var(--chart-2)" strokeWidth={2.5} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+            <>
+              {progressSummary && (
+                <div className="stats">
+                  <div className="chart-card">
+                    <h3>Current best</h3>
+                    <strong>{progressSummary.latest.bestSet}</strong>
+                    <p className="muted">Est. 1RM {progressSummary.latest.estimatedOneRepMax} lbs</p>
+                  </div>
+                  <div className="chart-card">
+                    <h3>All-time estimated 1RM</h3>
+                    <strong>{progressSummary.allTimeBest.estimatedOneRepMax} lbs</strong>
+                    <p className="muted">{progressSummary.allTimeBest.date} • {progressSummary.allTimeBest.bestSet}</p>
+                  </div>
+                  <div className="chart-card">
+                    <h3>Sessions</h3>
+                    <strong>{progressSummary.totalSessions}</strong>
+                    <p className="muted">1RM {progressSummary.e1rmChange >= 0 ? "+" : ""}{progressSummary.e1rmChange} lbs from previous</p>
+                  </div>
+                </div>
+              )}
+              <div className="chart-card shadcn-chart">
+                <h3>Exercise trend</h3>
+                <ResponsiveContainer width="100%" height={isMobileView ? 300 : 380}>
+                  <LineChart data={progressData} margin={isMobileView ? { top: 12, right: 8, left: -18, bottom: 10 } : { top: 16, right: 26, left: 22, bottom: 26 }}>
+                    <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="date" tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={isMobileView ? 18 : 8} tick={{ fontSize: isMobileView ? 10 : 12, fill: "var(--muted)" }}>
+                      {!isMobileView && <Label value="Date" offset={-14} position="insideBottom" fill="var(--muted)" fontSize={12} />}
+                    </XAxis>
+                    <YAxis yAxisId="weight" width={isMobileView ? 36 : 60} tickLine={false} axisLine={false} tick={{ fontSize: isMobileView ? 10 : 12, fill: "var(--muted)" }}>
+                      {!isMobileView && <Label value="Weight (lbs)" angle={-90} position="insideLeft" fill="var(--muted)" fontSize={12} />}
+                    </YAxis>
+                    <YAxis yAxisId="volume" orientation="right" width={isMobileView ? 36 : 60} tickLine={false} axisLine={false} tick={{ fontSize: isMobileView ? 10 : 12, fill: "var(--muted)" }}>
+                      {!isMobileView && <Label value="Volume (lbs)" angle={90} position="insideRight" fill="var(--muted)" fontSize={12} />}
+                    </YAxis>
+                    <Tooltip
+                      formatter={(value, name, item) => {
+                        const suffix = name === "Volume" ? " lbs volume" : " lbs";
+                        return [`${value}${suffix}`, name === "Estimated 1RM" ? "Est. 1RM" : name];
+                      }}
+                      labelFormatter={(label, payload) => {
+                        const row = payload?.[0]?.payload;
+                        return row ? `${label} • best ${row.bestSet} • ${row.sessions} ${row.sessions === 1 ? "session" : "sessions"}` : label;
+                      }}
+                      contentStyle={{ borderRadius: 14, border: "1px solid var(--line)", boxShadow: "0 12px 30px rgba(43,43,43,.12)" }}
+                    />
+                    <Line yAxisId="weight" type="monotone" dataKey="bestWeight" name="Best weight" stroke="var(--chart-1)" strokeWidth={2.5} dot={{ r: isMobileView ? 2 : 3 }} />
+                    <Line yAxisId="weight" type="monotone" dataKey="estimatedOneRepMax" name="Estimated 1RM" stroke="#555" strokeWidth={2.5} strokeDasharray="5 5" dot={{ r: isMobileView ? 2 : 3 }} />
+                    <Line yAxisId="volume" type="monotone" dataKey="volume" name="Volume" stroke="var(--chart-2)" strokeWidth={2.5} dot={{ r: isMobileView ? 2 : 3 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </>
           ) : <div className="empty">Search an exercise to see progress.</div>}
 
           {bodyWeightVsExerciseData.length > 0 && (
             <div className="chart-card shadcn-chart">
               <h3>Body weight vs {progressExercise} best weight</h3>
-              <ResponsiveContainer width="100%" height={340}>
-                <ScatterChart data={bodyWeightVsExerciseData} margin={{ top: 16, right: 28, left: 54, bottom: 30 }}>
+              <ResponsiveContainer width="100%" height={isMobileView ? 280 : 340}>
+                <ScatterChart data={bodyWeightVsExerciseData} margin={isMobileView ? { top: 12, right: 8, left: -8, bottom: 10 } : { top: 16, right: 28, left: 54, bottom: 30 }}>
                   <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" />
-                  <XAxis type="number" dataKey="bodyWeight" name="Body weight" unit=" lbs" tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: "var(--muted)" }}>
-                    <Label value="Body weight (lbs)" offset={-14} position="insideBottom" fill="var(--muted)" fontSize={12} />
+                  <XAxis type="number" dataKey="bodyWeight" name="Body weight" unit=" lbs" tickLine={false} axisLine={false} tick={{ fontSize: isMobileView ? 10 : 12, fill: "var(--muted)" }}>
+                    {!isMobileView && <Label value="Body weight (lbs)" offset={-14} position="insideBottom" fill="var(--muted)" fontSize={12} />}
                   </XAxis>
-                  <YAxis type="number" dataKey="exerciseWeight" name={`${progressExercise} best`} unit=" lbs" tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: "var(--muted)" }} width={58}>
-                    <Label value={`${progressExercise} best (lbs)`} angle={-90} position="left" offset={36} fill="var(--muted)" fontSize={12} />
+                  <YAxis type="number" dataKey="exerciseWeight" name={`${progressExercise} best`} unit=" lbs" tickLine={false} axisLine={false} tick={{ fontSize: isMobileView ? 10 : 12, fill: "var(--muted)" }} width={isMobileView ? 38 : 58}>
+                    {!isMobileView && <Label value={`${progressExercise} best (lbs)`} angle={-90} position="left" offset={36} fill="var(--muted)" fontSize={12} />}
                   </YAxis>
                   <Tooltip cursor={{ strokeDasharray: "3 3" }} formatter={(value, name) => [`${value} lbs`, name]} labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ""} contentStyle={{ borderRadius: 14, border: "1px solid var(--line)", boxShadow: "0 12px 30px rgba(43,43,43,.12)" }} />
                   <Scatter name={`${progressExercise} best`} data={bodyWeightVsExerciseData} fill="var(--chart-1)" />
@@ -1752,6 +1969,47 @@ export default function Home() {
           </div>
           <input className="input" placeholder="Notes (optional)" value={weightNotes} onChange={(event) => setWeightNotes(event.target.value)} />
           <button className="btn" onClick={saveBodyWeight}><Save size={18} /> {editingWeightId ? "Update weight" : "Save weight"}</button>
+
+          {weightSummary && (
+            <>
+              <div className="stats">
+                <div className="chart-card">
+                  <h3>Current weight</h3>
+                  <strong>{weightSummary.latest.weight} lbs</strong>
+                  <p className="muted">{weightSummary.previousChange >= 0 ? "+" : ""}{weightSummary.previousChange} lbs from previous</p>
+                </div>
+                <div className="chart-card">
+                  <h3>Total change</h3>
+                  <strong>{weightSummary.totalChange >= 0 ? "+" : ""}{weightSummary.totalChange} lbs</strong>
+                  <p className="muted">Across {weightSummary.entries} {weightSummary.entries === 1 ? "entry" : "entries"}</p>
+                </div>
+                <div className="chart-card">
+                  <h3>Range</h3>
+                  <strong>{weightSummary.lowest.weight} - {weightSummary.highest.weight} lbs</strong>
+                  <p className="muted">Low to high</p>
+                </div>
+              </div>
+              <div className="chart-card shadcn-chart">
+                <h3>Body weight trend</h3>
+                <ResponsiveContainer width="100%" height={isMobileView ? 280 : 340}>
+                  <LineChart data={weightChartData} margin={isMobileView ? { top: 12, right: 8, left: -10, bottom: 10 } : { top: 16, right: 26, left: 22, bottom: 26 }}>
+                    <CartesianGrid stroke="var(--line)" strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="date" tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={isMobileView ? 18 : 8} tick={{ fontSize: isMobileView ? 10 : 12, fill: "var(--muted)" }}>
+                      {!isMobileView && <Label value="Date" offset={-14} position="insideBottom" fill="var(--muted)" fontSize={12} />}
+                    </XAxis>
+                    <YAxis width={isMobileView ? 38 : 60} domain={["dataMin - 2", "dataMax + 2"]} tickLine={false} axisLine={false} tick={{ fontSize: isMobileView ? 10 : 12, fill: "var(--muted)" }}>
+                      {!isMobileView && <Label value="Body weight (lbs)" angle={-90} position="insideLeft" fill="var(--muted)" fontSize={12} />}
+                    </YAxis>
+                    <Tooltip formatter={(value) => [`${value} lbs`, "Weight"]} labelFormatter={(label, payload) => {
+                      const row = payload?.[0]?.payload;
+                      return row?.notes ? `${label} • ${row.notes}` : label;
+                    }} contentStyle={{ borderRadius: 14, border: "1px solid var(--line)", boxShadow: "0 12px 30px rgba(43,43,43,.12)" }} />
+                    <Line type="monotone" dataKey="weight" name="Weight" stroke="var(--chart-1)" strokeWidth={2.5} dot={{ r: isMobileView ? 2 : 3 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </>
+          )}
 
           {bodyWeights.length ? (
             <>
@@ -1870,6 +2128,22 @@ export default function Home() {
             <div className="dialog-actions">
               <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
               <button className="btn danger" onClick={clearCurrentDraft}>Clear all</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={Boolean(pendingRemoveExercise)} onOpenChange={(open) => !open && setPendingRemoveExercise(null)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title className="dialog-title">Remove from tracker?</Dialog.Title>
+            <Dialog.Description className="dialog-description">
+              Remove {pendingRemoveExercise?.name || "this exercise"} from this screen? Saved records will not be deleted.
+            </Dialog.Description>
+            <div className="dialog-actions">
+              <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
+              <button className="btn danger" onClick={() => pendingRemoveExercise && removeQueuedExercise(pendingRemoveExercise)}>Remove</button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>

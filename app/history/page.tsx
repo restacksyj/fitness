@@ -132,7 +132,7 @@ export default function HistoryPage() {
     }
 
     const exerciseNames = useMemo(() => {
-        return Array.from(new Set(history.map((h) => h.exercise_name))).sort((a, b) => a.localeCompare(b));
+        return Array.from(new Set(history.map((h) => h.exercise_name)));
     }, [history]);
 
     const exerciseSuggestions = useMemo(() => {
@@ -140,7 +140,6 @@ export default function HistoryPage() {
         if (!q) return [];
 
         const suggestions = new Map<string, ExerciseSuggestion>();
-        catalogSuggestions.forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
         exerciseNames
             .filter((name) => normalise(name).includes(q))
             .forEach((name) => {
@@ -149,6 +148,10 @@ export default function HistoryPage() {
                     suggestions.set(key, { id: key, name, category: "Recent", muscles: [], equipment: [], image_url: null, source: "history" });
                 }
             });
+        catalogSuggestions.forEach((exercise) => {
+            const key = normalise(exercise.name);
+            if (!suggestions.has(key)) suggestions.set(key, exercise);
+        });
 
         return Array.from(suggestions.values()).slice(0, 8);
     }, [catalogSuggestions, exerciseNames, search]);

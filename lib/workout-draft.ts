@@ -19,7 +19,7 @@ export function blankSet(): SetRow {
 }
 
 export function blankExercise(name = ""): ExerciseDraft {
-  return { id: crypto.randomUUID(), name, sets: [blankSet(), blankSet(), blankSet()] };
+  return { id: crypto.randomUUID(), name, sets: [blankSet()] };
 }
 
 export function loadWorkoutDraft(): WorkoutDraft | null {
