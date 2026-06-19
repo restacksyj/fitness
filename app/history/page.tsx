@@ -191,7 +191,7 @@ export default function HistoryPage() {
     function addEditRow() {
         setEditRows((current) => {
             const previous = current.at(-1);
-            const next = previous ? { ...previous, set: current.length + 1 } : { set: 1, reps: 0, weight: 0, notes: "" };
+            const next = previous ? { set: current.length + 1, reps: previous.reps, weight: previous.weight, notes: "" } : { set: 1, reps: 0, weight: 0, notes: "" };
             return [...current, next];
         });
     }

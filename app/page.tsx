@@ -4,9 +4,9 @@ import Link from "next/link";
 import * as Dialog from "@radix-ui/react-dialog";
 import { format } from "date-fns";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { DayPicker, type DateRange } from "react-day-picker";
+import { DayPicker } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Plus, RefreshCw, Save, Search, SlidersHorizontal, TrendingUp, Trash2, Weight, X } from "lucide-react";
+import { Activity, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Plus, RefreshCw, Save, Search, TrendingUp, Trash2, Weight, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
@@ -85,42 +85,6 @@ function DatePickerField({ label, value, onChange }: { label: string; value: str
   );
 }
 
-function DateRangePickerField({ from, to, onChange, compact = false }: { from: string; to: string; onChange: (range: { from: string; to: string }) => void; compact?: boolean }) {
-  const selected: DateRange | undefined = from || to ? { from: inputDateToDate(from), to: inputDateToDate(to) } : undefined;
-  const label = selected?.from
-    ? selected.to
-      ? `${format(selected.from, "MMM d, yyyy")} – ${format(selected.to, "MMM d, yyyy")}`
-      : `${format(selected.from, "MMM d, yyyy")} – optional`
-    : "Date range";
-
-  return (
-    <Dialog.Root>
-      <Dialog.Trigger asChild>
-        <button className={compact ? "bare-icon-btn" : "date-picker-trigger"} type="button" aria-label="Date range" title={label}>
-          <Calendar size={16} />
-          {!compact && <span>{label}</span>}
-        </button>
-      </Dialog.Trigger>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content date-dialog-content">
-          <Dialog.Title className="dialog-title">Date range</Dialog.Title>
-          <Dialog.Description className="dialog-description">Pick a start date. End date is optional.</Dialog.Description>
-          <DayPicker
-            mode="range"
-            selected={selected}
-            onSelect={(range) => onChange({ from: dateToInputValue(range?.from), to: dateToInputValue(range?.to) })}
-          />
-          <div className="dialog-actions">
-            <button className="btn secondary" onClick={() => onChange({ from: "", to: "" })}>Clear</button>
-            <Dialog.Close asChild><button className="btn">Done</button></Dialog.Close>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
 export default function Home() {
   const [activeSection, setActiveSection] = useState<ActiveSection>(() => {
     if (typeof window === "undefined") return "exercises";
@@ -146,8 +110,6 @@ export default function Home() {
   const [bodyWeights, setBodyWeights] = useState<BodyWeight[]>([]);
   const [bodyWeightHistory, setBodyWeightHistory] = useState<BodyWeight[]>([]);
   const [workoutSearch, setWorkoutSearch] = useState("");
-  const [workoutDateFrom, setWorkoutDateFrom] = useState("");
-  const [workoutDateTo, setWorkoutDateTo] = useState("");
   const [workoutPage, setWorkoutPage] = useState(0);
   const [editingWorkoutId, setEditingWorkoutId] = useState("");
   const [editWorkoutName, setEditWorkoutName] = useState("");
@@ -184,8 +146,6 @@ export default function Home() {
   const [isOnline, setIsOnline] = useState(true);
   const [offlineQueueCount, setOfflineQueueCount] = useState(0);
   const [syncingOffline, setSyncingOffline] = useState(false);
-  const [workoutTypeFilter, setWorkoutTypeFilter] = useState<"all" | "workout" | "exercise">("all");
-  const [workoutTypeFilterOpen, setWorkoutTypeFilterOpen] = useState(false);
   const [isMobileView, setIsMobileView] = useState(false);
   const offlineSyncInFlightRef = useRef(false);
 
@@ -639,20 +599,13 @@ export default function Home() {
 
   const filteredWorkouts = useMemo(() => {
     const q = normalise(workoutSearch);
-    const fromTime = workoutDateFrom ? new Date(`${workoutDateFrom}T00:00:00`).getTime() : null;
-    const toTime = workoutDateTo ? new Date(`${workoutDateTo}T23:59:59`).getTime() : null;
 
     return recentWorkouts.filter((workout) => {
-      const workoutTime = new Date(workout.created_at).getTime();
       const exercises = workout.workout_exercises ?? [];
-      const inferredType = exercises.length > 1 ? "workout" : "exercise";
-      const matchesType = workoutTypeFilter === "all" || inferredType === workoutTypeFilter;
       const matchesSearch = !q || normalise(workout.name || "").includes(q) || exercises.some((exercise) => normalise(exercise.exercise_name).includes(q));
-      const matchesFrom = fromTime === null || workoutTime >= fromTime;
-      const matchesTo = toTime === null || workoutTime <= toTime;
-      return matchesType && matchesSearch && matchesFrom && matchesTo;
+      return matchesSearch;
     });
-  }, [recentWorkouts, workoutDateFrom, workoutDateTo, workoutSearch, workoutTypeFilter]);
+  }, [recentWorkouts, workoutSearch]);
 
   const workoutTotalPages = Math.max(1, Math.ceil(filteredWorkouts.length / PAGE_SIZE));
   const safeWorkoutPage = Math.min(workoutPage, workoutTotalPages - 1);
@@ -1000,7 +953,7 @@ export default function Home() {
     setEditWorkoutExercises((prev) => prev.map((exercise) => {
       if (exercise.id !== exerciseId) return exercise;
       const previous = exercise.setRows.at(-1);
-      const nextSet = previous ? { ...previous, set: exercise.setRows.length + 1 } : { set: 1, reps: 0, weight: 0 };
+      const nextSet = previous ? { set: exercise.setRows.length + 1, reps: previous.reps, weight: previous.weight, notes: "" } : { set: 1, reps: 0, weight: 0, notes: "" };
       return { ...exercise, setRows: [...exercise.setRows, nextSet] };
     }));
   }
@@ -1318,7 +1271,7 @@ export default function Home() {
     setWorkoutQueue((prev) => prev.map((exercise) => {
       if (exercise.id !== exerciseId) return exercise;
       const previous = exercise.sets.at(-1);
-      const nextSet = previous ? { ...previous, id: crypto.randomUUID() } : blankSet();
+      const nextSet = previous ? { ...previous, id: crypto.randomUUID(), notes: "" } : blankSet();
       return { ...exercise, sets: [...exercise.sets, nextSet] };
     }));
   }
@@ -1554,9 +1507,10 @@ export default function Home() {
                           >
                             <button
                               className="drag-handle"
-                              style={{ width: 22, minWidth: 22, height: 30, border: 0, background: "transparent" }}
+                              style={{ width: 22, minWidth: 22, height: 30, border: 0, background: "transparent", touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}
                               draggable
                               aria-label={`Drag ${exercise.name} set ${index + 1} to reorder`}
+                              onPointerDown={(event) => event.currentTarget.setPointerCapture?.(event.pointerId)}
                               onDragStart={(event) => {
                                 setDraggingSetId(set.id);
                                 event.dataTransfer.effectAllowed = "move";
@@ -1601,75 +1555,7 @@ export default function Home() {
           <div className="workout-filters">
             <div className="input-icon-wrap workout-search-field">
               <Search className="input-icon" size={17} />
-              <input className="input with-icon" style={{ paddingRight: 82 }} placeholder="Search workout name or included exercise" value={workoutSearch} onChange={(event) => { setWorkoutSearch(event.target.value); setWorkoutPage(0); }} />
-              <div style={{ position: "absolute", right: 42, top: "50%", transform: "translateY(-50%)" }}>
-                <DateRangePickerField
-                  compact
-                  from={workoutDateFrom}
-                  to={workoutDateTo}
-                  onChange={(range) => {
-                    setWorkoutDateFrom(range.from);
-                    setWorkoutDateTo(range.to);
-                    setWorkoutPage(0);
-                  }}
-                />
-              </div>
-              <div style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)" }}>
-                <button
-                  className="bare-icon-btn"
-                  aria-label="Filter workout type"
-                  aria-expanded={workoutTypeFilterOpen}
-                  onClick={() => setWorkoutTypeFilterOpen((open) => !open)}
-                  title={`Type: ${workoutTypeFilter[0].toUpperCase() + workoutTypeFilter.slice(1)}`}
-                >
-                  <SlidersHorizontal size={18} />
-                </button>
-                {workoutTypeFilterOpen && (
-                  <div
-                    role="menu"
-                    aria-label="Workout type options"
-                    style={{
-                      position: "absolute",
-                      right: 0,
-                      top: "calc(100% + 8px)",
-                      zIndex: 4,
-                      display: "grid",
-                      minWidth: 148,
-                      overflow: "hidden",
-                      border: "1px solid var(--line)",
-                      borderRadius: 14,
-                      background: "#fff",
-                      boxShadow: "0 14px 34px rgba(43,43,43,.12)",
-                    }}
-                  >
-                    {(["all", "workout", "exercise"] as const).map((type) => (
-                      <button
-                        key={type}
-                        role="menuitemradio"
-                        aria-checked={workoutTypeFilter === type}
-                        onClick={() => {
-                          setWorkoutTypeFilter(type);
-                          setWorkoutPage(0);
-                          setWorkoutTypeFilterOpen(false);
-                        }}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          gap: 12,
-                          padding: "11px 12px",
-                          background: workoutTypeFilter === type ? "#f5f5f5" : "#fff",
-                          color: "var(--text)",
-                          textAlign: "left",
-                        }}
-                      >
-                        <span>{type[0].toUpperCase() + type.slice(1)}</span>
-                        {workoutTypeFilter === type && <Check size={15} />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <input className="input with-icon" placeholder="Search workout name or included exercise" value={workoutSearch} onChange={(event) => { setWorkoutSearch(event.target.value); setWorkoutPage(0); }} />
             </div>
           </div>
 
@@ -1679,9 +1565,8 @@ export default function Home() {
                 <table className="records-table">
                   <colgroup>
                     <col style={{ width: 42 }} />
-                    <col style={{ width: 118 }} />
-                    <col style={{ width: 84 }} />
                     <col />
+                    <col style={{ width: 118 }} />
                     <col style={{ width: 82 }} />
                     <col style={{ width: 96 }} />
                     <col style={{ width: 76 }} />
@@ -1689,9 +1574,8 @@ export default function Home() {
                   <thead>
                     <tr>
                       <th></th>
-                      <th>Date</th>
-                      <th>Type</th>
                       <th>Workout</th>
+                      <th>Date</th>
                       <th>Exercises</th>
                       <th>Volume</th>
                       <th></th>
@@ -1702,7 +1586,6 @@ export default function Home() {
                       const isExpanded = selectedWorkoutId === workout.id;
                       const isEditingWorkout = editingWorkoutId === workout.id;
                       const exercises = workout.workout_exercises ?? [];
-                      const workoutType = exercises.length > 1 ? "Workout" : "Exercise";
                       const volume = exercises.reduce((sum, exercise) => sum + Number(exercise.volume || 0), 0);
                       return (
                         <Fragment key={workout.id}>
@@ -1712,9 +1595,8 @@ export default function Home() {
                                 <ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={16} />
                               </button>
                             </td>
-                            <td>{new Date(workout.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</td>
-                            <td>{workoutType}</td>
                             <td>{workout.name || formatWorkoutName(new Date(workout.created_at))}</td>
+                            <td>{new Date(workout.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</td>
                             <td>{exercises.length}</td>
                             <td>{volume} lbs</td>
                             <td>
@@ -1745,7 +1627,7 @@ export default function Home() {
                           </tr>
                           {isExpanded && (
                             <tr className="record-detail-row workout-detail-row">
-                              <td colSpan={7} style={{ padding: 0 }}>
+                              <td colSpan={6} style={{ padding: 0 }}>
                                 <div className="record-detail-panel workout-detail-panel" style={{ padding: 0, width: "min(100%, calc(100vw - 60px))" }}>
                                   {isEditingWorkout && (
                                     <div className="row action-row">
