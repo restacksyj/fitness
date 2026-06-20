@@ -1562,14 +1562,14 @@ export default function Home() {
           {workoutRows.length ? (
             <>
               <div className="table-wrap">
-                <table className="records-table">
+                <table className="records-table workouts-table">
                   <colgroup>
-                    <col style={{ width: 42 }} />
-                    <col />
-                    <col style={{ width: 118 }} />
-                    <col style={{ width: 82 }} />
-                    <col style={{ width: 96 }} />
-                    <col style={{ width: 76 }} />
+                    <col style={{ width: "var(--workout-toggle-col)" }} />
+                    <col style={{ width: "var(--workout-name-col)" }} />
+                    <col style={{ width: "var(--workout-date-col)" }} />
+                    <col style={{ width: "var(--workout-exercises-col)" }} />
+                    <col style={{ width: "var(--workout-volume-col)" }} />
+                    <col style={{ width: "var(--workout-actions-col)" }} />
                   </colgroup>
                   <thead>
                     <tr>
@@ -1595,10 +1595,10 @@ export default function Home() {
                                 <ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={16} />
                               </button>
                             </td>
-                            <td>{workout.name || formatWorkoutName(new Date(workout.created_at))}</td>
-                            <td>{new Date(workout.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</td>
+                            <td className="workout-name-cell">{workout.name || formatWorkoutName(new Date(workout.created_at))}</td>
+                            <td className="workout-date-cell">{new Date(workout.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</td>
                             <td>{exercises.length}</td>
-                            <td>{volume} lbs</td>
+                            <td className="workout-volume-cell">{volume} lbs</td>
                             <td>
                               <div className="record-actions">
                                 <button
