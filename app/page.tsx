@@ -1394,9 +1394,9 @@ export default function Home() {
 
       {activeSection === "exercises" && workoutQueue.length > 0 && (
         <section className="card stack recent-card">
-          <div className="section-title">
+          <div className="section-title exercise-tracker-title">
             <h2><Activity size={18} /> Exercise tracker</h2>
-            <div className="row action-row">
+            <div className="row action-row tracker-actions-row">
               <button className="bare-icon-btn" aria-label="Clear all" onClick={() => setClearDraftModalOpen(true)}><Eraser size={18} /></button>
               <button className="bare-icon-btn" aria-label="Save to workout" disabled={saving || !hasUnsavedWorkoutExercises} onClick={saveWorkoutFromTrackers}><Save size={18} /></button>
             </div>
