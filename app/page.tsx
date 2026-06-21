@@ -2,20 +2,34 @@
 
 import Link from "next/link";
 import * as Dialog from "@radix-ui/react-dialog";
+import * as Select from "@radix-ui/react-select";
 import { format } from "date-fns";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DayPicker } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Plus, RefreshCw, Save, Search, TrendingUp, Trash2, Weight, X } from "lucide-react";
-import { CartesianGrid, Label, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
+import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Moon, Plus, RefreshCw, Save, Search, Send, Sun, TrendingUp, Trash2, Weight, X } from "lucide-react";
+import { CartesianGrid, Label, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
-import { isSupabaseConfigured, supabase, type BodyWeight, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
+import { isSupabaseConfigured, supabase, type BodyWeight, type CustomExercise, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
 import { blankExercise, blankSet, loadWorkoutDraft, saveWorkoutDraft, type ExerciseDraft, type SetRow } from "@/lib/workout-draft";
+import { useTheme } from "./providers";
 
 type WorkoutWithExercises = Workout & { workout_exercises: WorkoutExercise[] };
 type ExerciseTrackerDraft = { exerciseName: string; sets: SetRow[] };
-type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" };
-type EditableWorkoutExercise = { id: string; name: string; setRows: WorkoutSetRow[] };
+type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" | "custom" };
+type MuscleCatalogItem = Pick<ExerciseCatalogItem, "name" | "muscles" | "muscles_secondary">;
+type AgentTable = { title: string; columns: string[]; rows: string[][] };
+type AgentContext = {
+  exerciseNames?: string[];
+  muscleGroup?: string;
+  dateRange?: { label: string; start?: string; end?: string };
+  resultMode?: "summary" | "exercise-list" | "set-detail" | "best-set" | "workout-detail";
+  lastColumns?: string[];
+  lastRowCount?: number;
+};
+type AgentAnswer = { answer: string; breakdown?: Array<{ label: string; value: number; unit: string }>; tables?: AgentTable[]; context?: AgentContext };
+type AgentChatMessage = { id: string; role: "user" | "assistant"; content: string; breakdown?: AgentAnswer["breakdown"]; tables?: AgentTable[] };
+type EditableWorkoutExercise = { id: string; name: string; setRows: WorkoutSetRow[]; isNew?: boolean };
 type OfflineWorkoutPayload = { name: string; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
 type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on: string; notes: string | null };
 
@@ -28,9 +42,25 @@ const WEIGHT_PAGE_SIZE = 10;
 const todayInputValue = () => new Date().toISOString().slice(0, 10);
 const SECTION_STORAGE_KEY = "progressfit-active-section";
 type ActiveSection = "workouts" | "exercises" | "progress" | "weight";
+const MUSCLE_GROUPS = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core"] as const;
+const CUSTOM_EXERCISE_CATEGORIES = ["Arms", "Back", "Chest", "Core", "Legs", "Shoulders", "Cardio", "Full Body", "Other"] as const;
+const CUSTOM_EXERCISE_MUSCLES = ["Biceps", "Triceps", "Forearms", "Chest", "Lats", "Traps", "Rhomboids", "Rear delts", "Front delts", "Side delts", "Abs", "Obliques", "Lower back", "Quads", "Hamstrings", "Glutes", "Calves", "Adductors", "Abductors"] as const;
+const CUSTOM_EXERCISE_EQUIPMENT = ["Barbell", "Dumbbell", "Cable", "Machine", "Smith machine", "Bodyweight", "Bench", "Kettlebell", "Resistance band", "Other"] as const;
+type MuscleGroup = typeof MUSCLE_GROUPS[number];
 const estimateOneRepMax = (weight: number, reps: number) => Math.round(weight * (1 + reps / 30));
 const offlineId = (type: "weight" | "exercise" | "workout", id: number) => `offline-${type}-${id}`;
 const offlineQueueIdFrom = (id: string) => Number(id.split("-").at(-1));
+
+function muscleGroupFor(muscle: string): MuscleGroup | null {
+  const value = muscle.toLowerCase();
+  if (value.includes("pectoralis") || value.includes("chest")) return "Chest";
+  if (value.includes("latissimus") || value.includes("trapezius") || value.includes("teres") || value.includes("rhomboid") || value.includes("back")) return "Back";
+  if (value.includes("quadriceps") || value.includes("hamstring") || value.includes("glute") || value.includes("gastrocnemius") || value.includes("soleus") || value.includes("calf") || value.includes("adductor") || value.includes("abductor")) return "Legs";
+  if (value.includes("deltoid") || value.includes("shoulder")) return "Shoulders";
+  if (value.includes("biceps") || value.includes("triceps") || value.includes("brachialis") || value.includes("forearm") || value.includes("wrist")) return "Arms";
+  if (value.includes("abdominis") || value.includes("oblique") || value.includes("core")) return "Core";
+  return null;
+}
 
 function loadTrackerDraft(): ExerciseTrackerDraft | null {
   if (typeof window === "undefined") return null;
@@ -86,6 +116,7 @@ function DatePickerField({ label, value, onChange }: { label: string; value: str
 }
 
 export default function Home() {
+  const { theme, cycleTheme } = useTheme();
   const [activeSection, setActiveSection] = useState<ActiveSection>(() => {
     if (typeof window === "undefined") return "exercises";
     const saved = localStorage.getItem(SECTION_STORAGE_KEY);
@@ -98,15 +129,31 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authMessage, setAuthMessage] = useState("");
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [agentQuestion, setAgentQuestion] = useState("");
+  const [agentMessages, setAgentMessages] = useState<AgentChatMessage[]>([]);
+  const [agentContext, setAgentContext] = useState<AgentContext | undefined>();
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentError, setAgentError] = useState("");
   const [exerciseName, setExerciseName] = useState("");
   const [sets, setSets] = useState<SetRow[]>(blankTrackerSets());
   const [workoutName, setWorkoutName] = useState("");
+  const [savedWorkoutName, setSavedWorkoutName] = useState("");
   const [currentWorkoutId, setCurrentWorkoutId] = useState("");
   const [workoutQueue, setWorkoutQueue] = useState<ExerciseDraft[]>([]);
   const [history, setHistory] = useState<WorkoutExercise[]>([]);
   const [catalogSuggestions, setCatalogSuggestions] = useState<ExerciseSuggestion[]>([]);
   const [selectedExerciseMeta, setSelectedExerciseMeta] = useState<ExerciseSuggestion | null>(null);
+  const [customExerciseModalOpen, setCustomExerciseModalOpen] = useState(false);
+  const [customExerciseName, setCustomExerciseName] = useState("");
+  const [customExerciseCategory, setCustomExerciseCategory] = useState("");
+  const [customExerciseMuscles, setCustomExerciseMuscles] = useState<string[]>([]);
+  const [customExerciseEquipment, setCustomExerciseEquipment] = useState<string[]>([]);
+  const [customExerciseTarget, setCustomExerciseTarget] = useState<"tracker" | "progress" | "edit" | "none">("none");
+  const [activeEditExerciseId, setActiveEditExerciseId] = useState("");
+  const [editExerciseSuggestions, setEditExerciseSuggestions] = useState<ExerciseSuggestion[]>([]);
   const [recentWorkouts, setRecentWorkouts] = useState<WorkoutWithExercises[]>([]);
+  const [muscleCatalog, setMuscleCatalog] = useState<MuscleCatalogItem[]>([]);
   const [bodyWeights, setBodyWeights] = useState<BodyWeight[]>([]);
   const [bodyWeightHistory, setBodyWeightHistory] = useState<BodyWeight[]>([]);
   const [workoutSearch, setWorkoutSearch] = useState("");
@@ -131,6 +178,7 @@ export default function Home() {
   const [workoutNameInput, setWorkoutNameInput] = useState(formatWorkoutName());
   const [pendingDeleteWorkout, setPendingDeleteWorkout] = useState<WorkoutWithExercises | null>(null);
   const [pendingRemoveExercise, setPendingRemoveExercise] = useState<ExerciseDraft | null>(null);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [selectedWorkoutId, setSelectedWorkoutId] = useState("");
   const [expandedWorkoutExerciseIds, setExpandedWorkoutExerciseIds] = useState<string[]>([]);
   const [isExerciseSearchFocused, setIsExerciseSearchFocused] = useState(false);
@@ -174,6 +222,7 @@ export default function Home() {
         .filter((exercise) => exercise.name.trim())
         .map((exercise) => exercise.savedExerciseId?.startsWith("offline-") ? { ...exercise, savedExerciseId: undefined } : exercise);
       setWorkoutName(workoutDraft.workoutName);
+      setSavedWorkoutName(workoutDraft.workoutName);
       setCurrentWorkoutId(workoutDraft.workoutId ?? "");
       setWorkoutQueue(exercises);
       setCollapsedQueueIds(exercises.map((exercise) => exercise.id));
@@ -276,6 +325,7 @@ export default function Home() {
         return;
       }
 
+      const customRows = await searchCustomExercises(query, 8);
       const { data, error } = await supabase
         .from("exercise_catalog")
         .select("id,name,category,muscles,equipment,image_url")
@@ -287,24 +337,22 @@ export default function Home() {
       if (error) {
         console.error(error.message);
         const cached = await searchCachedExerciseCatalog(query, 8);
-        setCatalogSuggestions(cached.map((exercise) => ({ ...exercise, source: "catalog" })));
+        setCatalogSuggestions([...customRows, ...cached.map((exercise) => ({ ...exercise, source: "catalog" as const }))].slice(0, 8));
         return;
       }
 
       const rows = (data ?? []) as Omit<ExerciseSuggestion, "source">[];
       await cacheExerciseCatalog(rows);
-      setCatalogSuggestions(
-        rows
-          .filter((exercise) => normalise(exercise.name) !== normalise(query))
-          .map((exercise) => ({ ...exercise, source: "catalog" })),
-      );
+      const suggestions = new Map<string, ExerciseSuggestion>();
+      [...customRows, ...rows.filter((exercise) => normalise(exercise.name) !== normalise(query)).map((exercise) => ({ ...exercise, source: "catalog" as const }))].forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
+      setCatalogSuggestions(Array.from(suggestions.values()).slice(0, 8));
     }, 180);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [exerciseName]);
+  }, [exerciseName, userKey]);
 
   useEffect(() => {
     const query = progressExercise.trim();
@@ -321,6 +369,7 @@ export default function Home() {
         return;
       }
 
+      const customRows = await searchCustomExercises(query, 8);
       const { data, error } = await supabase
         .from("exercise_catalog")
         .select("id,name,category,muscles,equipment,image_url")
@@ -332,20 +381,63 @@ export default function Home() {
       if (error) {
         console.error(error.message);
         const cached = await searchCachedExerciseCatalog(query, 8);
-        setProgressCatalogSuggestions(cached.map((exercise) => ({ ...exercise, source: "catalog" })));
+        setProgressCatalogSuggestions([...customRows, ...cached.map((exercise) => ({ ...exercise, source: "catalog" as const }))].slice(0, 8));
         return;
       }
 
       const rows = (data ?? []) as Omit<ExerciseSuggestion, "source">[];
       await cacheExerciseCatalog(rows);
-      setProgressCatalogSuggestions(rows.map((exercise) => ({ ...exercise, source: "catalog" })));
+      const suggestions = new Map<string, ExerciseSuggestion>();
+      [...customRows, ...rows.map((exercise) => ({ ...exercise, source: "catalog" as const }))].forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
+      setProgressCatalogSuggestions(Array.from(suggestions.values()).slice(0, 8));
     }, 180);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [progressExercise]);
+  }, [progressExercise, userKey]);
+
+  useEffect(() => {
+    const activeExercise = editWorkoutExercises.find((exercise) => exercise.id === activeEditExerciseId);
+    const query = activeExercise?.name.trim() ?? "";
+    if (!activeEditExerciseId || query.length < 2) {
+      setEditExerciseSuggestions([]);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = window.setTimeout(async () => {
+      const customRows = await searchCustomExercises(query, 8);
+      if (!navigator.onLine || !isSupabaseConfigured) {
+        const cached = await searchCachedExerciseCatalog(query, 8);
+        if (!cancelled) setEditExerciseSuggestions([...customRows, ...cached.map((exercise) => ({ ...exercise, source: "catalog" as const }))].slice(0, 8));
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("exercise_catalog")
+        .select("id,name,category,muscles,equipment,image_url")
+        .ilike("name", `%${query}%`)
+        .order("name", { ascending: true })
+        .limit(8);
+
+      if (cancelled) return;
+      if (error) {
+        console.error(error.message);
+        setEditExerciseSuggestions(customRows);
+        return;
+      }
+      const suggestions = new Map<string, ExerciseSuggestion>();
+      [...customRows, ...((data ?? []) as Omit<ExerciseSuggestion, "source">[]).map((exercise) => ({ ...exercise, source: "catalog" as const }))].forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
+      setEditExerciseSuggestions(Array.from(suggestions.values()).slice(0, 8));
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [activeEditExerciseId, editWorkoutExercises, userKey]);
 
   useEffect(() => {
     const query = progressExercise.trim();
@@ -380,6 +472,43 @@ export default function Home() {
     };
   }, [progressExercise, userKey]);
 
+  useEffect(() => {
+    const names = Array.from(new Set(recentWorkouts.flatMap((workout) => (workout.workout_exercises ?? []).map((exercise) => exercise.exercise_name.trim()).filter(Boolean))));
+    if (!names.length || !isSupabaseConfigured || !navigator.onLine) {
+      setMuscleCatalog([]);
+      return;
+    }
+
+    let cancelled = false;
+    async function loadMuscleCatalog() {
+      const { data, error } = await supabase
+        .from("exercise_catalog")
+        .select("name,muscles,muscles_secondary")
+        .in("name", names)
+        .limit(500);
+
+      const custom = userKey ? await supabase
+        .from("custom_exercises")
+        .select("name,muscles,muscles_secondary")
+        .eq("user_key", userKey)
+        .in("name", names)
+        .limit(500) : { data: [], error: null };
+
+      if (cancelled) return;
+      if (error || custom.error) {
+        console.error(error?.message || custom.error?.message);
+        setMuscleCatalog([]);
+        return;
+      }
+      setMuscleCatalog([...(data ?? []), ...(custom.data ?? [])] as MuscleCatalogItem[]);
+    }
+
+    loadMuscleCatalog();
+    return () => {
+      cancelled = true;
+    };
+  }, [recentWorkouts, userKey]);
+
   async function signInWithEmail() {
     const email = authEmail.trim();
     if (!email || !authPassword) return alert("Enter your email and password.");
@@ -401,8 +530,51 @@ export default function Home() {
     setAuthMessage("Account created. If email confirmations are enabled, check your email, then sign in.");
   }
 
+  async function askAgent(questionOverride?: string) {
+    const question = (questionOverride ?? agentQuestion).trim();
+    if (!question) return;
+    if (!authUserEmail) {
+      setAgentError("Sign in before asking ProgressFit.");
+      return;
+    }
+
+    const userMessage: AgentChatMessage = { id: crypto.randomUUID(), role: "user", content: question };
+    const nextMessages = [...agentMessages, userMessage];
+    setAgentMessages(nextMessages);
+    setAgentQuestion("");
+    setAgentLoading(true);
+    setAgentError("");
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) {
+      setAgentLoading(false);
+      setAgentError("Sign in before asking ProgressFit.");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ question, messages: nextMessages.map((message) => ({ role: message.role, content: message.content })), context: agentContext }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "ProgressFit could not answer that yet.");
+      const answer = body as AgentAnswer;
+      setAgentContext(answer.context);
+      setAgentMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", content: answer.answer, breakdown: answer.breakdown, tables: answer.tables }]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ProgressFit could not answer that yet.";
+      setAgentError(message);
+      setAgentMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", content: message }]);
+    } finally {
+      setAgentLoading(false);
+    }
+  }
+
   async function signOut() {
     await supabase.auth.signOut();
+    setLogoutConfirmOpen(false);
     setUserKey("");
     setAuthUserEmail("");
     setHistory([]);
@@ -414,6 +586,87 @@ export default function Home() {
 
   async function refreshOfflineCount(key = userKey) {
     setOfflineQueueCount(await getOfflineQueueCount(key));
+  }
+
+  const toggleListValue = (values: string[], value: string) => values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+
+  const customSuggestion = (exercise: Pick<CustomExercise, "id" | "name" | "category" | "muscles" | "equipment">): ExerciseSuggestion => ({
+    id: exercise.id,
+    name: exercise.name,
+    category: exercise.category || "Custom",
+    muscles: exercise.muscles ?? [],
+    equipment: exercise.equipment ?? [],
+    image_url: null,
+    source: "custom",
+  });
+
+  async function searchCustomExercises(query: string, limit = 8) {
+    if (!userKey || !navigator.onLine || !isSupabaseConfigured) return [] as ExerciseSuggestion[];
+    const { data, error } = await supabase
+      .from("custom_exercises")
+      .select("id,name,category,muscles,equipment")
+      .eq("user_key", userKey)
+      .ilike("name", `%${query}%`)
+      .order("name", { ascending: true })
+      .limit(limit);
+    if (error) {
+      console.error(error.message);
+      return [];
+    }
+    return ((data ?? []) as Array<Pick<CustomExercise, "id" | "name" | "category" | "muscles" | "equipment">>).map(customSuggestion);
+  }
+
+  function openCustomExerciseModal(name: string, target: "tracker" | "progress" | "edit") {
+    setCustomExerciseName(name.trim());
+    setCustomExerciseCategory("");
+    setCustomExerciseMuscles([]);
+    setCustomExerciseEquipment([]);
+    setCustomExerciseTarget(target);
+    setCustomExerciseModalOpen(true);
+  }
+
+  async function saveCustomExercise() {
+    const name = customExerciseName.trim();
+    if (!name) return alert("Enter an exercise name.");
+    if (!userKey) return alert("Sign in before adding custom exercises.");
+
+    const payload = {
+      user_key: userKey,
+      name,
+      category: customExerciseCategory.trim() || null,
+      muscles: customExerciseMuscles,
+      muscles_secondary: [],
+      equipment: customExerciseEquipment,
+      updated_at: new Date().toISOString(),
+    };
+    const existing = await supabase
+      .from("custom_exercises")
+      .select("id")
+      .eq("user_key", userKey)
+      .ilike("name", name)
+      .maybeSingle();
+    if (existing.error) return alert(existing.error.message);
+    const query = existing.data?.id
+      ? supabase.from("custom_exercises").update(payload).eq("id", existing.data.id).eq("user_key", userKey)
+      : supabase.from("custom_exercises").insert(payload);
+    const { data, error } = await query.select("id,name,category,muscles,equipment").single();
+    if (error) return alert(error.message);
+
+    const suggestion = customSuggestion(data as Pick<CustomExercise, "id" | "name" | "category" | "muscles" | "equipment">);
+    if (customExerciseTarget === "tracker") {
+      setExerciseName(suggestion.name);
+      setSelectedExerciseMeta(suggestion);
+      setCatalogSuggestions([]);
+    } else if (customExerciseTarget === "progress") {
+      setProgressExercise(suggestion.name);
+      setProgressCatalogSuggestions([]);
+    } else if (customExerciseTarget === "edit" && activeEditExerciseId) {
+      updateEditWorkoutExercise(activeEditExerciseId, { name: suggestion.name });
+      setEditExerciseSuggestions([]);
+    }
+    setCustomExerciseModalOpen(false);
+    setToast(`${suggestion.name} added`);
+    setTimeout(() => setToast(""), 2200);
   }
 
   async function warmExerciseCatalogCache() {
@@ -612,6 +865,39 @@ export default function Home() {
   const workoutRows = filteredWorkouts.slice(safeWorkoutPage * PAGE_SIZE, safeWorkoutPage * PAGE_SIZE + PAGE_SIZE);
   const selectedWorkout = recentWorkouts.find((workout) => workout.id === selectedWorkoutId);
   const hasUnsavedWorkoutExercises = workoutQueue.some((exercise) => !exercise.savedExerciseId);
+  const workoutTitle = workoutName.trim() || formatWorkoutName();
+  const hasWorkoutNameChanged = workoutTitle !== (savedWorkoutName.trim() || formatWorkoutName());
+  const muscleBalance = useMemo(() => {
+    const catalogByName = new Map(muscleCatalog.map((exercise) => [normalise(exercise.name), exercise]));
+    const totals = new Map<MuscleGroup, number>(MUSCLE_GROUPS.map((group) => [group, 0]));
+    const unmatched = new Set<string>();
+
+    recentWorkouts.forEach((workout) => {
+      (workout.workout_exercises ?? []).forEach((exercise) => {
+        const metadata = catalogByName.get(normalise(exercise.exercise_name));
+        if (!metadata) {
+          unmatched.add(exercise.exercise_name);
+          return;
+        }
+
+        const volume = Number(exercise.volume) || 0;
+        metadata.muscles.forEach((muscle) => {
+          const group = muscleGroupFor(muscle);
+          if (group) totals.set(group, (totals.get(group) ?? 0) + volume);
+        });
+        metadata.muscles_secondary.forEach((muscle) => {
+          const group = muscleGroupFor(muscle);
+          if (group) totals.set(group, (totals.get(group) ?? 0) + volume * 0.5);
+        });
+      });
+    });
+
+    return {
+      data: MUSCLE_GROUPS.map((group) => ({ muscleGroup: group, volume: Math.round(totals.get(group) ?? 0) })),
+      unmatchedCount: unmatched.size,
+      matchedCount: recentWorkouts.reduce((count, workout) => count + (workout.workout_exercises ?? []).filter((exercise) => catalogByName.has(normalise(exercise.exercise_name))).length, 0),
+    };
+  }, [muscleCatalog, recentWorkouts]);
   const weightTotalPages = Math.max(1, Math.ceil(bodyWeightCount / WEIGHT_PAGE_SIZE));
   const safeWeightPage = Math.min(weightPage, weightTotalPages - 1);
   const weightRows = bodyWeights;
@@ -772,6 +1058,7 @@ export default function Home() {
     setCollapsedQueueIds([]);
     setCurrentWorkoutId("");
     setWorkoutName("");
+    setSavedWorkoutName("");
     clearTracker();
     setClearDraftModalOpen(false);
     setToast("Draft cleared");
@@ -839,7 +1126,7 @@ export default function Home() {
     if (saved) clearTracker();
   }
 
-  function saveWorkoutFromTrackers() {
+  async function saveWorkoutFromTrackers() {
     if (!workoutQueue.length) return alert("Add at least one exercise before saving a workout.");
 
     const rows = workoutQueue
@@ -848,18 +1135,45 @@ export default function Home() {
       .filter((exercise) => exercise.name && exercise.sets.length);
 
     if (!isSupabaseConfigured) return alert("Add Supabase env vars in .env.local first.");
-    if (!rows.length || !userKey) return alert("Add at least one exercise with a valid set before saving a workout.");
+    if (!rows.length) {
+      if (hasWorkoutNameChanged) return saveWorkoutNameChange();
+      return alert("Add at least one exercise with a valid set before saving a workout.");
+    }
+    if (!userKey) return alert("Sign in before saving a workout.");
 
-    setWorkoutNameInput(workoutName || formatWorkoutName());
-    setWorkoutNameModalOpen(true);
+    await confirmSaveWorkout(workoutTitle);
   }
 
-  async function confirmSaveWorkout() {
+  async function saveWorkoutNameChange() {
+    const title = workoutTitle;
+    if (!currentWorkoutId) {
+      setSavedWorkoutName(title);
+      setWorkoutName(title);
+      setToast("Workout name saved");
+      setTimeout(() => setToast(""), 2200);
+      return;
+    }
+    if (!userKey) return alert("Sign in before updating a workout name.");
+    if (!navigator.onLine) return alert("Connect to the internet before updating a saved workout name.");
+
+    setSaving(true);
+    const { error } = await supabase.from("workouts").update({ name: title }).eq("id", currentWorkoutId).eq("user_key", userKey);
+    setSaving(false);
+    if (error) return alert(error.message);
+
+    setSavedWorkoutName(title);
+    setWorkoutName(title);
+    await loadData();
+    setToast("Workout name updated");
+    setTimeout(() => setToast(""), 2200);
+  }
+
+  async function confirmSaveWorkout(titleOverride?: string) {
     const rows = workoutQueue
       .filter((exercise) => !exercise.savedExerciseId)
       .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets) }))
       .filter((exercise) => exercise.name && exercise.sets.length);
-    const title = workoutNameInput.trim() || formatWorkoutName();
+    const title = titleOverride?.trim() || workoutNameInput.trim() || workoutTitle;
 
     if (!rows.length) return alert("Add at least one unsaved exercise with a valid set before saving a workout.");
 
@@ -875,6 +1189,8 @@ export default function Home() {
       await refreshOfflineCount();
       setWorkoutQueue((prev) => prev.map((exercise) => rows.some((row) => row.exercise.id === exercise.id) ? { ...exercise, savedExerciseId: offlineId("workout", queueId) } : exercise));
       setWorkoutNameModalOpen(false);
+      setSavedWorkoutName(title);
+      setWorkoutName(title);
       setToast(`${title} saved offline`);
       setTimeout(() => setToast(""), 2200);
       return;
@@ -912,6 +1228,7 @@ export default function Home() {
     setWorkoutNameModalOpen(false);
     setCurrentWorkoutId(workout.id);
     setWorkoutName(title);
+    setSavedWorkoutName(title);
     await loadData();
     setToast(`${title} saved`);
     setTimeout(() => setToast(""), 2200);
@@ -969,6 +1286,13 @@ export default function Home() {
     setEditWorkoutExercises((prev) => prev.filter((exercise) => exercise.id !== exerciseId));
   }
 
+  function addEditWorkoutExercise() {
+    const id = `new-${crypto.randomUUID()}`;
+    setEditWorkoutExercises((prev) => [...prev, { id, name: "", setRows: [{ set: 1, reps: 0, weight: 0, notes: "" }], isNew: true }]);
+    setExpandedWorkoutExerciseIds((prev) => [...prev, id]);
+    setActiveEditExerciseId(id);
+  }
+
   async function saveEditWorkout(workout: WorkoutWithExercises) {
     const workoutName = editWorkoutName.trim() || formatWorkoutName(new Date(workout.created_at));
     const exerciseUpdates = editWorkoutExercises.map((exercise) => {
@@ -999,7 +1323,10 @@ export default function Home() {
         volume: exercise.setRows.reduce((sum, set) => sum + set.reps * set.weight, 0),
         set_rows: exercise.setRows,
       };
-      const { error } = await supabase.from("workout_exercises").update(payload).eq("id", exercise.id).eq("user_key", userKey);
+      const query = exercise.isNew
+        ? supabase.from("workout_exercises").insert({ ...payload, workout_id: workout.id, user_key: userKey })
+        : supabase.from("workout_exercises").update(payload).eq("id", exercise.id).eq("user_key", userKey);
+      const { error } = await query;
       if (error) return alert(error.message);
     }
 
@@ -1310,9 +1637,13 @@ export default function Home() {
           <p>Track exercises, workouts, and body weight.</p>
         </div>
         <div className="hero-actions">
+          <button className="bare-icon-btn hero-auth-btn theme-toggle" aria-label={`Theme: ${theme}. Switch theme`} title={`Theme: ${theme}`} onClick={cycleTheme} suppressHydrationWarning>
+            {theme === "dark" ? <Moon size={20} /> : <Sun size={20} />}
+          </button>
+          <button className="bare-icon-btn hero-auth-btn" aria-label="Ask ProgressFit" title="Ask ProgressFit" onClick={() => setAgentModalOpen(true)}><Bot size={20} /></button>
           <button className="bare-icon-btn hero-auth-btn" aria-label="Refresh" onClick={() => window.location.reload()}><RefreshCw size={20} /></button>
           {authLoading ? null : authUserEmail ? (
-            <button className="bare-icon-btn hero-auth-btn" aria-label="Sign out" title={authUserEmail} onClick={signOut}><LogOut size={20} /></button>
+            <button className="bare-icon-btn hero-auth-btn" aria-label="Sign out" title={authUserEmail} onClick={() => setLogoutConfirmOpen(true)}><LogOut size={20} /></button>
           ) : (
             <button className="bare-icon-btn hero-auth-btn" aria-label="Sign in" onClick={() => setAuthModalOpen(true)}><LogIn size={20} /></button>
           )}
@@ -1363,7 +1694,7 @@ export default function Home() {
               <X size={16} />
             </button>
           )}
-          {isExerciseSearchFocused && exerciseSuggestions.length > 0 && (
+          {isExerciseSearchFocused && exerciseName.trim().length >= 2 && (
             <div className="exercise-suggestions" role="listbox">
               {exerciseSuggestions.map((exercise) => (
                 <div
@@ -1386,6 +1717,12 @@ export default function Home() {
                   </span>
                 </div>
               ))}
+              {!exerciseSuggestions.some((exercise) => normalise(exercise.name) === normalise(exerciseName)) && (
+                <button className="exercise-suggestion-item" style={{ width: "100%", textAlign: "left" }} type="button" onMouseDown={(event) => { event.preventDefault(); openCustomExerciseModal(exerciseName, "tracker"); }}>
+                  <span className="exercise-suggestion-icon"><Plus size={17} /></span>
+                  <span className="exercise-suggestion-copy"><span>Add custom exercise</span><small>{exerciseName.trim()}</small></span>
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1395,10 +1732,13 @@ export default function Home() {
       {activeSection === "exercises" && workoutQueue.length > 0 && (
         <section className="card stack recent-card">
           <div className="section-title exercise-tracker-title">
-            <h2><Activity size={18} /> Exercise tracker</h2>
+            <label className="workout-name-title">
+              <Activity size={18} />
+              <input value={workoutName} onChange={(event) => setWorkoutName(event.target.value)} placeholder={formatWorkoutName()} aria-label="Workout name" />
+            </label>
             <div className="row action-row tracker-actions-row">
               <button className="bare-icon-btn" aria-label="Clear all" onClick={() => setClearDraftModalOpen(true)}><Eraser size={18} /></button>
-              <button className="bare-icon-btn" aria-label="Save to workout" disabled={saving || !hasUnsavedWorkoutExercises} onClick={saveWorkoutFromTrackers}><Save size={18} /></button>
+              <button className="bare-icon-btn" aria-label="Save to workout" disabled={saving || (!hasUnsavedWorkoutExercises && !hasWorkoutNameChanged)} onClick={saveWorkoutFromTrackers}><Save size={18} /></button>
             </div>
           </div>
           <div className="workout-list">
@@ -1630,13 +1970,16 @@ export default function Home() {
                               <td colSpan={6} style={{ padding: 0 }}>
                                 <div className="record-detail-panel workout-detail-panel" style={{ padding: 0, width: "min(100%, calc(100vw - 60px))" }}>
                                   {isEditingWorkout && (
-                                    <div className="row action-row">
-                                      <input className="detail-input" value={editWorkoutName} onChange={(event) => setEditWorkoutName(event.target.value)} aria-label="Workout name" />
-                                      <button className="bare-icon-btn" aria-label="Cancel editing workout" onClick={cancelEditWorkout}><X size={17} /></button>
-                                      <button className="bare-icon-btn" aria-label="Save workout changes" onClick={() => saveEditWorkout(workout)}><Check size={17} /></button>
+                                    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "center", padding: "12px 12px 4px" }}>
+                                      <input className="detail-input" style={{ padding: "10px 12px" }} value={editWorkoutName} onChange={(event) => setEditWorkoutName(event.target.value)} aria-label="Workout name" />
+                                      <div className="row" style={{ gap: 8 }}>
+                                        <button className="bare-icon-btn" aria-label="Add exercise to workout" onClick={addEditWorkoutExercise}><Plus size={17} /></button>
+                                        <button className="bare-icon-btn" aria-label="Cancel editing workout" onClick={cancelEditWorkout}><X size={17} /></button>
+                                        <button className="bare-icon-btn" aria-label="Save workout changes" onClick={() => saveEditWorkout(workout)}><Check size={17} /></button>
+                                      </div>
                                     </div>
                                   )}
-                                  {exercises.length ? (
+                                  {(isEditingWorkout ? editWorkoutExercises.length : exercises.length) ? (
                                     <div
                                       className="recent-record-list"
                                       style={{
@@ -1648,34 +1991,62 @@ export default function Home() {
                                         padding: "10px 8px 12px 20px",
                                       }}
                                     >
-                                      {exercises.filter((exercise) => !isEditingWorkout || editWorkoutExercises.some((item) => item.id === exercise.id)).map((exercise) => {
-                                        const editExercise = editWorkoutExercises.find((item) => item.id === exercise.id);
-                                        const setRows = exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }];
+                                      {(isEditingWorkout ? editWorkoutExercises : exercises).map((exercise) => {
+                                        const editExercise = isEditingWorkout ? exercise as EditableWorkoutExercise : editWorkoutExercises.find((item) => item.id === exercise.id);
+                                        const originalExercise = exercises.find((item) => item.id === exercise.id);
+                                        const exerciseNameValue = isEditingWorkout ? (exercise as EditableWorkoutExercise).name : (exercise as WorkoutExercise).exercise_name;
+                                        const setRows = !isEditingWorkout && "set_rows" in exercise ? (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }]) : [];
                                         const displayRows = isEditingWorkout && editExercise ? editExercise.setRows : setRows;
-                                        const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id) || isEditingWorkout;
+                                        const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id);
                                         const summaryRows = displayRows.filter((set) => Number(set.reps) > 0 && Number(set.weight) >= 0);
                                         const bestRow = summaryRows.reduce<WorkoutSetRow | null>((best, set) => !best || Number(set.weight) > Number(best.weight) ? set : best, null);
                                         return (
                                            <div
                                              className="record-detail-panel recent-record-panel"
-                                             key={exercise.id}
+                                              key={exercise.id}
                                              style={{ border: "1px solid var(--line)", borderRadius: 14, padding: 14 }}
                                            >
                                             <div style={{ display: "grid", gridTemplateColumns: isEditingWorkout ? "1fr auto" : "1fr", gap: 8, alignItems: "center" }}>
-                                              <button
-                                                className="record-summary-toggle"
-                                                onClick={() => !isEditingWorkout && setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}
-                                              >
-                                                <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
-                                                <span>{isEditingWorkout && editExercise ? <input className="detail-input" value={editExercise.name} onChange={(event) => updateEditWorkoutExercise(exercise.id, { name: event.target.value })} /> : exercise.exercise_name}</span>
-                                                <span>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>
-                                              </button>
-                                              {isEditingWorkout && <button className="bare-icon-btn" aria-label={`Delete ${exercise.exercise_name}`} onClick={() => removeEditWorkoutExercise(exercise.id)}><Trash2 size={15} /></button>}
+                                              {isEditingWorkout && editExercise ? (
+                                                <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", gap: 8, alignItems: "center", width: "100%" }}>
+                                                  <button className="bare-icon-btn" aria-label={isExerciseExpanded ? `Collapse ${exerciseNameValue || "exercise"}` : `Expand ${exerciseNameValue || "exercise"}`} onClick={() => setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}>
+                                                    <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
+                                                  </button>
+                                                  <div className="input-icon-wrap search-combo" style={{ display: "block", minWidth: 0 }}>
+                                                    <input className="detail-input" value={editExercise.name} placeholder="Search exercise" onFocus={() => setActiveEditExerciseId(exercise.id)} onBlur={() => setTimeout(() => { setActiveEditExerciseId(""); setEditExerciseSuggestions([]); }, 120)} onChange={(event) => { setActiveEditExerciseId(exercise.id); updateEditWorkoutExercise(exercise.id, { name: event.target.value }); }} />
+                                                    {activeEditExerciseId === exercise.id && editExercise.name.trim().length >= 2 && (
+                                                      <div className="exercise-suggestions" role="listbox">
+                                                        {editExerciseSuggestions.map((suggestion) => (
+                                                          <div className="exercise-suggestion-item" key={`${suggestion.source}-${suggestion.id}`} role="option" tabIndex={0} onMouseDown={(event) => { event.preventDefault(); updateEditWorkoutExercise(exercise.id, { name: suggestion.name }); setEditExerciseSuggestions([]); setActiveEditExerciseId(""); }}>
+                                                            <span className="exercise-suggestion-icon">{suggestion.image_url ? <img src={suggestion.image_url} alt="" /> : <Dumbbell size={17} />}</span>
+                                                            <span className="exercise-suggestion-copy"><span>{suggestion.name}</span><small>{[suggestion.category, suggestion.muscles?.[0], suggestion.equipment?.[0]].filter(Boolean).join(" • ")}</small></span>
+                                                          </div>
+                                                        ))}
+                                                        {!editExerciseSuggestions.some((suggestion) => normalise(suggestion.name) === normalise(editExercise.name)) && (
+                                                          <button className="exercise-suggestion-item" style={{ width: "100%", textAlign: "left" }} type="button" onMouseDown={(event) => { event.preventDefault(); openCustomExerciseModal(editExercise.name, "edit"); }}>
+                                                            <span className="exercise-suggestion-icon"><Plus size={17} /></span>
+                                                            <span className="exercise-suggestion-copy"><span>Add custom exercise</span><small>{editExercise.name.trim()}</small></span>
+                                                          </button>
+                                                        )}
+                                                      </div>
+                                                    )}
+                                                  </div>
+                                                  <span className="muted" style={{ whiteSpace: "nowrap" }}>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>
+                                                </div>
+                                              ) : (
+                                                <button className="record-summary-toggle" onClick={() => setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}>
+                                                  <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
+                                                  <span>{exerciseNameValue}</span>
+                                                  <span>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>
+                                                </button>
+                                              )}
+                                              {isEditingWorkout && <button className="bare-icon-btn" aria-label={`Delete ${exerciseNameValue || "exercise"}`} onClick={() => removeEditWorkoutExercise(exercise.id)}><Trash2 size={15} /></button>}
                                             </div>
                                             {isExerciseExpanded && (
                                               <>
                                                 <div className="record-detail-meta">
-                                                  <span>{exercise.volume} lbs volume</span>
+                                                  <span>{originalExercise?.volume ?? 0} lbs volume</span>
+                                                  {!isEditingWorkout && <Link href={`/history?exercise=${encodeURIComponent(exerciseNameValue.trim())}`}>View records</Link>}
                                                 </div>
                                                 <div className="set-detail-table">
                                                   <div className="set-detail-head" style={{ gridTemplateColumns: isEditingWorkout ? "0.5fr 1fr 1fr 1.25fr 34px" : "0.6fr 1fr 1fr 1.3fr" }}>
@@ -1693,7 +2064,7 @@ export default function Home() {
                                                           <input className="detail-input" inputMode="numeric" value={set.reps} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
                                                           <input className="detail-input" inputMode="decimal" value={set.weight} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
                                                           <input className="detail-input" value={set.notes ?? ""} placeholder="Notes" onChange={(event) => updateEditWorkoutSet(exercise.id, index, { notes: event.target.value })} />
-                                                          <button className="bare-icon-btn" aria-label={`Delete ${exercise.exercise_name} set ${index + 1}`} onClick={() => removeEditWorkoutSet(exercise.id, index)}><X size={14} /></button>
+                                                          <button className="bare-icon-btn" aria-label={`Delete ${exerciseNameValue || "exercise"} set ${index + 1}`} onClick={() => removeEditWorkoutSet(exercise.id, index)}><X size={14} /></button>
                                                         </>
                                                       ) : (
                                                         <>
@@ -1705,7 +2076,7 @@ export default function Home() {
                                                     </div>
                                                   ))}
                                                 </div>
-                                                {isEditingWorkout && <button className="bare-icon-btn" aria-label={`Add set to ${exercise.exercise_name}`} onClick={() => addEditWorkoutSet(exercise.id)}><Plus size={16} /></button>}
+                                                {isEditingWorkout && <button className="bare-icon-btn" aria-label={`Add set to ${exerciseNameValue || "exercise"}`} onClick={() => addEditWorkoutSet(exercise.id)}><Plus size={16} /></button>}
                                               </>
                                             )}
                                           </div>
@@ -1756,7 +2127,7 @@ export default function Home() {
                 <X size={16} />
               </button>
             )}
-            {isProgressSearchFocused && progressSuggestions.length > 0 && (
+            {isProgressSearchFocused && progressExercise.trim().length >= 2 && (
               <div className="exercise-suggestions" role="listbox">
                 {progressSuggestions.map((exercise) => (
                   <div
@@ -1779,9 +2150,29 @@ export default function Home() {
                     </span>
                   </div>
                 ))}
+                {!progressSuggestions.some((exercise) => normalise(exercise.name) === normalise(progressExercise)) && (
+                  <button className="exercise-suggestion-item" style={{ width: "100%", textAlign: "left" }} type="button" onMouseDown={(event) => { event.preventDefault(); openCustomExerciseModal(progressExercise, "progress"); }}>
+                    <span className="exercise-suggestion-icon"><Plus size={17} /></span>
+                    <span className="exercise-suggestion-copy"><span>Add custom exercise</span><small>{progressExercise.trim()}</small></span>
+                  </button>
+                )}
               </div>
             )}
           </div>
+          {muscleBalance.matchedCount > 0 && (
+            <div className="chart-card shadcn-chart">
+              <h3>Muscle balance</h3>
+              <ResponsiveContainer width="100%" height={isMobileView ? 300 : 360}>
+                <RadarChart data={muscleBalance.data} outerRadius={isMobileView ? 92 : 126}>
+                  <PolarGrid stroke="var(--line)" />
+                  <PolarAngleAxis dataKey="muscleGroup" tick={{ fontSize: isMobileView ? 11 : 12, fill: "var(--muted)" }} />
+                  <PolarRadiusAxis tick={false} axisLine={false} />
+                  <Tooltip formatter={(value) => [`${value} lbs`, "Volume"]} contentStyle={{ borderRadius: 14, border: "1px solid var(--line)", boxShadow: "0 12px 30px rgba(43,43,43,.12)" }} />
+                  <Radar name="Volume" dataKey="volume" stroke="var(--chart-1)" fill="var(--chart-1)" fillOpacity={0.18} strokeWidth={2.5} />
+                </RadarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
           {progressData.length ? (
             <>
               {progressSummary && (
@@ -2015,6 +2406,122 @@ export default function Home() {
         </Dialog.Portal>
       </Dialog.Root>
 
+      <Dialog.Root open={agentModalOpen} onOpenChange={setAgentModalOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content agent-dialog-content">
+            <div className="agent-dialog-head">
+              <div style={{ minWidth: 0 }}>
+                <Dialog.Title className="dialog-title">Ask ProgressFit</Dialog.Title>
+                <Dialog.Description className="dialog-description">Ask follow-up questions about your training history.</Dialog.Description>
+              </div>
+              <div className="row" style={{ flexShrink: 0 }}>
+                {agentMessages.length > 0 && <button className="bare-icon-btn" onClick={() => { setAgentMessages([]); setAgentError(""); setAgentContext(undefined); }} aria-label="Clear chat" title="Clear chat"><Trash2 size={17} /></button>}
+                <Dialog.Close asChild><button className="bare-icon-btn" aria-label="Close agent" title="Close"><ChevronDown size={20} /></button></Dialog.Close>
+              </div>
+            </div>
+            <div className="agent-chat-log">
+              {agentMessages.length === 0 ? (
+                <div className="agent-welcome">
+                  <strong>What do you want to know?</strong>
+                  <p className="muted">Try a training question, then ask follow-ups like “what about chest?” or “and this month?”.</p>
+                  <div className="agent-prompts">
+                    {["Arm sets last month", "Chest volume this week", "Workouts this month", "Top muscle group last month"].map((prompt) => (
+                      <button className="suggestion" key={prompt} type="button" onClick={() => askAgent(prompt)} disabled={agentLoading}>{prompt}</button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                agentMessages.map((message) => (
+                  <div className={`agent-message ${message.role}`} key={message.id}>
+                    <div className="agent-bubble">
+                      <p>{message.content}</p>
+                      {message.breakdown?.length ? (
+                        <div className="agent-breakdown">
+                          {message.breakdown.map((row) => (
+                            <div className="agent-breakdown-row" key={`${message.id}-${row.label}`}>
+                              <span>{row.label}</span>
+                              <span>{row.value} {row.unit}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      {message.tables?.map((table) => (
+                        <div className="set-detail-table" key={`${message.id}-${table.title}`}>
+                          <div className="set-detail-head" style={{ gridTemplateColumns: `repeat(${table.columns.length}, minmax(0, 1fr))` }}>
+                            {table.columns.map((column) => <span key={column}>{column}</span>)}
+                          </div>
+                          {table.title && <div className="set-detail-row" style={{ gridTemplateColumns: "1fr" }}><span>{table.title}</span></div>}
+                          {table.rows.map((row, rowIndex) => (
+                            <div className="set-detail-row" style={{ gridTemplateColumns: `repeat(${table.columns.length}, minmax(0, 1fr))` }} key={`${table.title}-${rowIndex}`}>
+                              {row.map((cell, cellIndex) => <span key={`${rowIndex}-${cellIndex}`}>{cell || "-"}</span>)}
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+              {agentLoading && <div className="agent-message assistant"><div className="agent-bubble"><p>ProgressFit is checking...</p></div></div>}
+            </div>
+            {agentError && <p className="muted">{agentError}</p>}
+            <form className="agent-form" onSubmit={(event) => { event.preventDefault(); askAgent(); }}>
+              <input className="input" value={agentQuestion} onChange={(event) => setAgentQuestion(event.target.value)} placeholder={agentMessages.length ? "Ask a follow-up..." : "How many arm sets did I do last month?"} />
+              <button className="btn icon-btn" type="submit" disabled={agentLoading || !agentQuestion.trim()} aria-label="Ask"><Send size={17} /></button>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={customExerciseModalOpen} onOpenChange={setCustomExerciseModalOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title className="dialog-title">Add custom exercise</Dialog.Title>
+            <input className="input" value={customExerciseName} onChange={(event) => setCustomExerciseName(event.target.value)} placeholder="Exercise name" />
+            <Select.Root value={customExerciseCategory} onValueChange={setCustomExerciseCategory}>
+              <Select.Trigger className="input" aria-label="Exercise category" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <Select.Value placeholder="Select category" />
+                <Select.Icon asChild><ChevronDown size={18} /></Select.Icon>
+              </Select.Trigger>
+              <Select.Portal>
+                <Select.Content position="popper" sideOffset={6} style={{ zIndex: 40, minWidth: "var(--radix-select-trigger-width)", overflow: "hidden", border: "1px solid var(--line)", borderRadius: 16, background: "var(--panel)", color: "var(--text)", boxShadow: "0 14px 32px rgba(43,43,43,.16)" }}>
+                  <Select.Viewport>
+                    {CUSTOM_EXERCISE_CATEGORIES.map((category) => (
+                      <Select.Item value={category} key={category} style={{ display: "grid", gridTemplateColumns: "20px 1fr", gap: 8, alignItems: "center", padding: "11px 12px", cursor: "pointer", outline: "none" }}>
+                        <Select.ItemIndicator><Check size={15} /></Select.ItemIndicator>
+                        <Select.ItemText>{category}</Select.ItemText>
+                      </Select.Item>
+                    ))}
+                  </Select.Viewport>
+                </Select.Content>
+              </Select.Portal>
+            </Select.Root>
+            <div className="stack">
+              <small className="muted">Primary muscles</small>
+              <div className="agent-prompts" style={{ justifyContent: "flex-start" }}>
+                {CUSTOM_EXERCISE_MUSCLES.map((muscle) => (
+                  <button className="suggestion" style={{ width: "auto", background: customExerciseMuscles.includes(muscle) ? "var(--brand)" : undefined, color: customExerciseMuscles.includes(muscle) ? "var(--bg)" : undefined }} type="button" key={muscle} onClick={() => setCustomExerciseMuscles((current) => toggleListValue(current, muscle))}>{muscle}</button>
+                ))}
+              </div>
+            </div>
+            <div className="stack">
+              <small className="muted">Equipment</small>
+              <div className="agent-prompts" style={{ justifyContent: "flex-start" }}>
+                {CUSTOM_EXERCISE_EQUIPMENT.map((equipment) => (
+                  <button className="suggestion" style={{ width: "auto", background: customExerciseEquipment.includes(equipment) ? "var(--brand)" : undefined, color: customExerciseEquipment.includes(equipment) ? "var(--bg)" : undefined }} type="button" key={equipment} onClick={() => setCustomExerciseEquipment((current) => toggleListValue(current, equipment))}>{equipment}</button>
+                ))}
+              </div>
+            </div>
+            <div className="dialog-actions">
+              <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
+              <button className="btn" onClick={saveCustomExercise}>Save exercise</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
       <Dialog.Root open={workoutNameModalOpen} onOpenChange={setWorkoutNameModalOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
@@ -2024,7 +2531,7 @@ export default function Home() {
             <input className="input" value={workoutNameInput} onChange={(event) => setWorkoutNameInput(event.target.value)} placeholder={formatWorkoutName()} />
             <div className="dialog-actions">
               <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
-              <button className="btn" disabled={saving} onClick={confirmSaveWorkout}>{saving ? "Saving..." : "Save workout"}</button>
+              <button className="btn" disabled={saving} onClick={() => confirmSaveWorkout()}>{saving ? "Saving..." : "Save workout"}</button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
@@ -2041,6 +2548,22 @@ export default function Home() {
             <div className="dialog-actions">
               <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
               <button className="btn danger" onClick={confirmDeleteWorkout}>Delete</button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={logoutConfirmOpen} onOpenChange={setLogoutConfirmOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
+            <Dialog.Title className="dialog-title">Sign out?</Dialog.Title>
+            <Dialog.Description className="dialog-description">
+              You will need to sign in again to sync your workouts.
+            </Dialog.Description>
+            <div className="dialog-actions">
+              <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
+              <button className="btn danger" onClick={signOut}>Sign out</button>
             </div>
           </Dialog.Content>
         </Dialog.Portal>

@@ -56,6 +56,19 @@ export type ExerciseCatalogItem = {
   updated_at: string;
 };
 
+export type CustomExercise = {
+  id: string;
+  user_key: string;
+  name: string;
+  category: string | null;
+  muscles: string[];
+  muscles_secondary: string[];
+  equipment: string[];
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type BodyWeight = {
   id: string;
   user_key: string;

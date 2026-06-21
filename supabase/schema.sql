@@ -53,6 +53,22 @@ create index if not exists exercise_catalog_name_idx on public.exercise_catalog 
 create index if not exists exercise_catalog_lower_name_idx on public.exercise_catalog(lower(name));
 create index if not exists exercise_catalog_category_idx on public.exercise_catalog(category);
 
+create table if not exists public.custom_exercises (
+  id uuid primary key default gen_random_uuid(),
+  user_key text not null,
+  name text not null,
+  category text,
+  muscles text[] not null default '{}',
+  muscles_secondary text[] not null default '{}',
+  equipment text[] not null default '{}',
+  notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists custom_exercises_user_name_idx on public.custom_exercises(user_key, lower(name));
+create unique index if not exists custom_exercises_user_lower_name_unique on public.custom_exercises(user_key, lower(name));
+
 create table if not exists public.body_weights (
   id uuid primary key default gen_random_uuid(),
   user_key text not null,
@@ -68,6 +84,7 @@ create index if not exists body_weights_user_date_idx on public.body_weights(use
 alter table public.workouts enable row level security;
 alter table public.workout_exercises enable row level security;
 alter table public.exercise_catalog enable row level security;
+alter table public.custom_exercises enable row level security;
 alter table public.body_weights enable row level security;
 
 -- Publishable keys use the anon Postgres role until a user signs in.
@@ -90,6 +107,10 @@ drop policy if exists "authenticated can update own workout exercises" on public
 drop policy if exists "authenticated can delete own workout exercises" on public.workout_exercises;
 drop policy if exists "anon can read exercise catalog" on public.exercise_catalog;
 drop policy if exists "authenticated can read exercise catalog" on public.exercise_catalog;
+drop policy if exists "authenticated can insert own custom exercises" on public.custom_exercises;
+drop policy if exists "authenticated can read own custom exercises" on public.custom_exercises;
+drop policy if exists "authenticated can update own custom exercises" on public.custom_exercises;
+drop policy if exists "authenticated can delete own custom exercises" on public.custom_exercises;
 drop policy if exists "anon can insert body weights" on public.body_weights;
 drop policy if exists "anon can read body weights" on public.body_weights;
 drop policy if exists "anon can update body weights" on public.body_weights;
@@ -109,6 +130,10 @@ create policy "authenticated can update own workout exercises" on public.workout
 create policy "authenticated can delete own workout exercises" on public.workout_exercises for delete to authenticated using ((select auth.uid())::text = user_key);
 create policy "anon can read exercise catalog" on public.exercise_catalog for select to anon using (true);
 create policy "authenticated can read exercise catalog" on public.exercise_catalog for select to authenticated using (true);
+create policy "authenticated can insert own custom exercises" on public.custom_exercises for insert to authenticated with check ((select auth.uid())::text = user_key);
+create policy "authenticated can read own custom exercises" on public.custom_exercises for select to authenticated using ((select auth.uid())::text = user_key);
+create policy "authenticated can update own custom exercises" on public.custom_exercises for update to authenticated using ((select auth.uid())::text = user_key) with check ((select auth.uid())::text = user_key);
+create policy "authenticated can delete own custom exercises" on public.custom_exercises for delete to authenticated using ((select auth.uid())::text = user_key);
 create policy "authenticated can insert own body weights" on public.body_weights for insert to authenticated with check ((select auth.uid())::text = user_key);
 create policy "authenticated can read own body weights" on public.body_weights for select to authenticated using ((select auth.uid())::text = user_key);
 create policy "authenticated can update own body weights" on public.body_weights for update to authenticated using ((select auth.uid())::text = user_key) with check ((select auth.uid())::text = user_key);
