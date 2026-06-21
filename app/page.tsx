@@ -2409,15 +2409,15 @@ export default function Home() {
       <Dialog.Root open={agentModalOpen} onOpenChange={setAgentModalOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content agent-dialog-content">
-            <div className="agent-dialog-head">
-              <div style={{ minWidth: 0 }}>
+          <Dialog.Content className="dialog-content agent-dialog-content" style={{ top: "max(12px, env(safe-area-inset-top))", bottom: "max(12px, env(safe-area-inset-bottom))", left: 8, right: 8, width: "auto", height: "auto", maxHeight: "none", transform: "none", paddingTop: 16 }}>
+            <div className="agent-dialog-head" style={{ alignItems: "flex-start" }}>
+              <div style={{ minWidth: 0, paddingRight: 8 }}>
                 <Dialog.Title className="dialog-title">Ask ProgressFit</Dialog.Title>
                 <Dialog.Description className="dialog-description">Ask follow-up questions about your training history.</Dialog.Description>
               </div>
-              <div className="row" style={{ flexShrink: 0 }}>
-                {agentMessages.length > 0 && <button className="bare-icon-btn" onClick={() => { setAgentMessages([]); setAgentError(""); setAgentContext(undefined); }} aria-label="Clear chat" title="Clear chat"><Trash2 size={17} /></button>}
-                <Dialog.Close asChild><button className="bare-icon-btn" aria-label="Close agent" title="Close"><ChevronDown size={20} /></button></Dialog.Close>
+              <div className="row" style={{ flexShrink: 0, gap: 6 }}>
+                {agentMessages.length > 0 && <button className="bare-icon-btn" style={{ width: 44, height: 44, padding: 0 }} onClick={() => { setAgentMessages([]); setAgentError(""); setAgentContext(undefined); }} aria-label="Clear chat" title="Clear chat"><Trash2 size={18} /></button>}
+                <Dialog.Close asChild><button className="bare-icon-btn" style={{ width: 44, height: 44, padding: 0 }} aria-label="Close agent" title="Close"><X size={22} /></button></Dialog.Close>
               </div>
             </div>
             <div className="agent-chat-log">

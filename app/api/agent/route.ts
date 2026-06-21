@@ -85,6 +85,10 @@ function wantsProgressionAdvice(question: string) {
   return /\b(how can i improve|improve|progress|progression|what should i increase|to what|how much weight|how many reps)\b/i.test(question);
 }
 
+function wantsArmSetsSummary(question: string) {
+  return /\barm(s)?\b/i.test(question) && /\bsets?\b/i.test(question) && /\blast month\b/i.test(question);
+}
+
 function inferDateRange(question: string): AgentContext["dateRange"] | undefined {
   const lower = question.toLowerCase();
   const now = new Date();
@@ -110,6 +114,13 @@ function inferDateRange(question: string): AgentContext["dateRange"] | undefined
     return { label: "today", start: iso(today), end: iso(end) };
   }
   return undefined;
+}
+
+function previousMonthRange(): NonNullable<AgentContext["dateRange"]> {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  return { label: "last month", start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
 function inferContext(question: string, rows: Record<string, unknown>[], mode: AgentContext["resultMode"]): AgentContext {
@@ -346,6 +357,25 @@ LIMIT 100`;
   return { sql, rows };
 }
 
+async function executeArmSetsLastMonth(userId: string) {
+  const range = previousMonthRange();
+  const sql = `SELECT we.exercise_name, SUM(we.sets)::int AS sets, SUM(we.volume)::numeric AS volume
+FROM workout_exercises we
+WHERE we.user_key = $1
+  AND we.created_at >= $2::timestamptz
+  AND we.created_at < $3::timestamptz
+  AND (
+    we.exercise_name ILIKE '%bicep%' OR we.exercise_name ILIKE '%tricep%' OR we.exercise_name ILIKE '%triceps%' OR
+    we.exercise_name ILIKE '%curl%' OR we.exercise_name ILIKE '%pushdown%' OR we.exercise_name ILIKE '%pressdown%' OR
+    we.exercise_name ILIKE '%skull crusher%' OR we.exercise_name ILIKE '%extension%' OR we.exercise_name ILIKE '%dip%'
+  )
+GROUP BY we.exercise_name
+ORDER BY sets DESC, we.exercise_name
+LIMIT 100`;
+  const rows = await executeReadOnlySql(sql, userId, [range.start, range.end]);
+  return { sql, rows, range };
+}
+
 async function summarise(question: string, messages: AgentMessage[], rows: Record<string, unknown>[], sql: string, previousContext?: AgentContext, mode?: AgentContext["resultMode"]) {
   const tables = buildSetTables(rows);
   const context = mergeContext(previousContext, inferContext(question, rows, mode ?? (tables.length ? "set-detail" : "summary")));
@@ -393,6 +423,15 @@ async function answerWithSqlAgent(question: string, messages: AgentMessage[], us
   if (!sqlPool) return { answer: "The SQL agent needs READONLY_DATABASE_URL configured for your Supabase Postgres database.", breakdown: [] } satisfies AgentAnswer;
   if (!groqKey) return { answer: "The SQL agent needs GROQ_API_KEY or GROQ_AI_KEY configured.", breakdown: [] } satisfies AgentAnswer;
 
+  if (wantsArmSetsSummary(question)) {
+    try {
+      const result = await executeArmSetsLastMonth(userId);
+      return await summarise(question, messages, result.rows, result.sql, { ...context, muscleGroup: "arms", dateRange: result.range }, "summary");
+    } catch (error) {
+      console.error("Deterministic arm sets query failed", error);
+    }
+  }
+
   if (wantsSetDetails(question) && context?.exerciseNames?.length && context.dateRange?.start && context.dateRange.end) {
     try {
       const detailResult = await executeSetDetailsFromContext(context, userId);
@@ -422,12 +461,13 @@ async function answerWithSqlAgent(question: string, messages: AgentMessage[], us
       }
       return await summarise(question, messages, rows, plan.sql, context, buildSetTables(rows).length ? "set-detail" : "summary");
     } catch (error) {
-      rejected = { sql: plan.sql, reason: error instanceof Error ? error.message : "SQL execution failed" };
+      const message = error instanceof Error ? error.message : "SQL execution failed";
+      rejected = { sql: plan.sql, reason: message.includes("custom_exercises") ? `${message}. The custom_exercises table may not exist in this environment; retry using workout_exercises and exercise_catalog/name fallbacks only.` : message };
       console.error("SQL agent query failed", error, plan.sql);
     }
   }
 
-  return { answer: "I couldn't turn that into a safe read-only query yet.", breakdown: [] } satisfies AgentAnswer;
+  return { answer: "I couldn't turn that into a safe read-only query yet. If this works locally but not in production, check that READONLY_DATABASE_URL, GROQ_API_KEY, and the latest custom_exercises schema are configured in production.", breakdown: [] } satisfies AgentAnswer;
 }
 
 export async function POST(request: Request) {
