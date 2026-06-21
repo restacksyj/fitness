@@ -2409,7 +2409,7 @@ export default function Home() {
       <Dialog.Root open={agentModalOpen} onOpenChange={setAgentModalOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content agent-dialog-content" style={{ top: "max(12px, env(safe-area-inset-top))", bottom: "max(12px, env(safe-area-inset-bottom))", left: 8, right: 8, width: "auto", height: "auto", maxHeight: "none", transform: "none", paddingTop: 16 }}>
+          <Dialog.Content className="dialog-content agent-dialog-content" style={{ top: "max(12px, env(safe-area-inset-top))", bottom: "auto", left: 8, right: 8, width: "auto", height: "calc(100dvh - max(12px, env(safe-area-inset-top)))", maxHeight: "none", transform: "none", paddingTop: 16, paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}>
             <div className="agent-dialog-head" style={{ alignItems: "flex-start" }}>
               <div style={{ minWidth: 0, paddingRight: 8 }}>
                 <Dialog.Title className="dialog-title">Ask ProgressFit</Dialog.Title>
