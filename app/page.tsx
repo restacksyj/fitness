@@ -1636,6 +1636,20 @@ export default function Home() {
     }));
   }
 
+  function adjustQueuedSetWeight(exerciseId: string, setId: string, delta: number) {
+    setWorkoutQueue((prev) => prev.map((exercise) => {
+      if (exercise.id !== exerciseId) return exercise;
+      return {
+        ...exercise,
+        sets: exercise.sets.map((set) => {
+          if (set.id !== setId) return set;
+          const current = Number(set.weight) || 0;
+          return { ...set, weight: String(Math.max(0, current + delta)) };
+        }),
+      };
+    }));
+  }
+
   function reorderQueuedSets(exerciseId: string, fromId: string, toId: string) {
     if (!fromId || !toId || fromId === toId) return;
     setWorkoutQueue((prev) =>
@@ -1897,7 +1911,32 @@ export default function Home() {
                               <GripVertical size={14} />
                             </button>
                             <span className="set-number">{index + 1}</span>
-                            <input className="input" inputMode="decimal" aria-label={`${exercise.name} set ${index + 1} weight in lbs`} placeholder="lbs" value={set.weight} onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, "") })} />
+                            <div className="weight-control">
+                              <input
+                                className="input weight-input"
+                                inputMode="decimal"
+                                aria-label={`${exercise.name} set ${index + 1} weight in lbs`}
+                                placeholder="0"
+                                value={set.weight}
+                                onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, "") })}
+                              />
+                              <button
+                                className="weight-step-btn weight-step-btn-left"
+                                type="button"
+                                aria-label={`Decrease ${exercise.name} set ${index + 1} weight by 5 lbs`}
+                                onClick={() => adjustQueuedSetWeight(exercise.id, set.id, -5)}
+                              >
+                                <Minus size={14} />
+                              </button>
+                              <button
+                                className="weight-step-btn weight-step-btn-right"
+                                type="button"
+                                aria-label={`Increase ${exercise.name} set ${index + 1} weight by 5 lbs`}
+                                onClick={() => adjustQueuedSetWeight(exercise.id, set.id, 5)}
+                              >
+                                <Plus size={14} />
+                              </button>
+                            </div>
                             <div className="reps-control">
                               <input
                                 className="input reps-input"
