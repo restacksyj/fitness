@@ -1866,7 +1866,7 @@ export default function Home() {
                         </div>
                       )}
                       <div className="queued-set-table">
-                        <div className="set-grid queued-set-grid table-head" style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 450 }} aria-hidden="true">
+                        <div className="set-grid queued-set-grid table-head" style={{ gridTemplateColumns: "24px 32px minmax(100px,1.1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 474 }} aria-hidden="true">
                           <span></span>
                           <span>Set</span>
                           <span>Weight</span>
@@ -1878,7 +1878,7 @@ export default function Home() {
                         {exercise.sets.map((set, index) => (
                           <div
                             className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
-                            style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 450 }}
+                            style={{ gridTemplateColumns: "24px 32px minmax(100px,1.1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 474 }}
                             key={set.id}
                             onDragOver={(event) => {
                               event.preventDefault();
