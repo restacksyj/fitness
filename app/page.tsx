@@ -117,11 +117,7 @@ function DatePickerField({ label, value, onChange }: { label: string; value: str
 
 export default function Home() {
   const { theme, cycleTheme } = useTheme();
-  const [activeSection, setActiveSection] = useState<ActiveSection>(() => {
-    if (typeof window === "undefined") return "exercises";
-    const saved = localStorage.getItem(SECTION_STORAGE_KEY);
-    return saved === "workouts" || saved === "exercises" || saved === "progress" || saved === "weight" ? saved : "exercises";
-  });
+  const [activeSection, setActiveSection] = useState<ActiveSection>("exercises");
   const [userKey, setUserKey] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -196,8 +192,20 @@ export default function Home() {
   const [syncingOffline, setSyncingOffline] = useState(false);
   const [isMobileView, setIsMobileView] = useState(false);
   const offlineSyncInFlightRef = useRef(false);
+  const weightFormRef = useRef<HTMLDivElement | null>(null);
+  const weightInputRef = useRef<HTMLInputElement | null>(null);
+  const skipInitialSectionPersistRef = useRef(true);
 
   useEffect(() => {
+    const saved = localStorage.getItem(SECTION_STORAGE_KEY);
+    if (saved === "workouts" || saved === "exercises" || saved === "progress" || saved === "weight") setActiveSection(saved);
+  }, []);
+
+  useEffect(() => {
+    if (skipInitialSectionPersistRef.current) {
+      skipInitialSectionPersistRef.current = false;
+      return;
+    }
     localStorage.setItem(SECTION_STORAGE_KEY, activeSection);
   }, [activeSection]);
 
@@ -1396,21 +1404,32 @@ export default function Home() {
       : await supabase.from("body_weights").upsert(payload, { onConflict: "user_key,measured_on" });
 
     if (error) return alert(error.message);
-    setWeightValue("");
-    setWeightNotes("");
-    setWeightDate(todayInputValue());
+    const wasEditing = Boolean(editingWeightId);
+    resetWeightForm();
     setEditingWeightId("");
     setWeightPage(0);
     await Promise.all([loadBodyWeights(userKey, 0), loadBodyWeightHistory(userKey)]);
-    setToast(editingWeightId ? "Weight updated" : "Weight saved");
+    setToast(wasEditing ? "Weight updated" : "Weight saved");
     setTimeout(() => setToast(""), 2200);
   }
 
   function startEditWeight(row: BodyWeight) {
+    setActiveSection("weight");
     setEditingWeightId(row.id);
     setWeightValue(String(row.weight));
     setWeightDate(row.measured_on);
     setWeightNotes(row.notes ?? "");
+    window.setTimeout(() => {
+      weightFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      weightInputRef.current?.focus();
+    }, 0);
+  }
+
+  function resetWeightForm() {
+    setWeightValue("");
+    setWeightNotes("");
+    setWeightDate(todayInputValue());
+    setEditingWeightId("");
   }
 
   async function confirmDeleteWeight() {
@@ -1637,7 +1656,7 @@ export default function Home() {
           <p>Track exercises, workouts, and body weight.</p>
         </div>
         <div className="hero-actions">
-          <button className="bare-icon-btn hero-auth-btn theme-toggle" aria-label={`Theme: ${theme}. Switch theme`} title={`Theme: ${theme}`} onClick={cycleTheme} suppressHydrationWarning>
+          <button className="bare-icon-btn hero-auth-btn theme-toggle" aria-label={`Theme: ${theme}. Switch theme`} title={`Theme: ${theme}`} onClick={cycleTheme}>
             {theme === "dark" ? <Moon size={20} /> : <Sun size={20} />}
           </button>
           <button className="bare-icon-btn hero-auth-btn" aria-label="Ask ProgressFit" title="Ask ProgressFit" onClick={() => setAgentModalOpen(true)}><Bot size={20} /></button>
@@ -2299,12 +2318,17 @@ export default function Home() {
           <div className="section-title">
             <h2><Weight size={18} /> Weight</h2>
           </div>
-          <div className="date-filters">
-            <DatePickerField label="Weight date" value={weightDate} onChange={setWeightDate} />
-            <input className="input" inputMode="decimal" placeholder="Weight (lbs)" value={weightValue} onChange={(event) => setWeightValue(event.target.value.replace(/[^0-9.]/g, ""))} />
+          <div ref={weightFormRef} className="stack">
+            {editingWeightId && <div className="sync-status" style={{ marginBottom: 0 }}><span>Editing weight entry</span><span>{weightDate}</span></div>}
+            <div className="date-filters">
+              <DatePickerField label="Weight date" value={weightDate} onChange={setWeightDate} />
+              <input ref={weightInputRef} className="input" inputMode="decimal" placeholder="Weight (lbs)" value={weightValue} onChange={(event) => setWeightValue(event.target.value.replace(/[^0-9.]/g, ""))} />
+            </div>
+            <input className="input" placeholder="Notes (optional)" value={weightNotes} onChange={(event) => setWeightNotes(event.target.value)} />
+            <div className="row action-row">
+              <button className="btn" onClick={saveBodyWeight}><Save size={18} /> {editingWeightId ? "Update weight" : "Save weight"}</button>
+            </div>
           </div>
-          <input className="input" placeholder="Notes (optional)" value={weightNotes} onChange={(event) => setWeightNotes(event.target.value)} />
-          <button className="btn" onClick={saveBodyWeight}><Save size={18} /> {editingWeightId ? "Update weight" : "Save weight"}</button>
 
           {weightSummary && (
             <>

@@ -19,7 +19,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 const groqKey = process.env.GROQ_API_KEY || process.env.GROQ_AI_KEY;
 const databaseUrl = process.env.READONLY_DATABASE_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL;
-const groqModel = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const groqModel = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 
 const sqlPool = databaseUrl
   ? new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("supabase") ? { rejectUnauthorized: false } : undefined, max: 2 })
@@ -87,6 +87,16 @@ function wantsProgressionAdvice(question: string) {
 
 function wantsArmSetsSummary(question: string) {
   return /\barm(s)?\b/i.test(question) && /\bsets?\b/i.test(question) && /\blast month\b/i.test(question);
+}
+
+function databaseConnectionMessage(error: unknown) {
+  if (!error || typeof error !== "object") return null;
+  const code = "code" in error ? String((error as { code?: unknown }).code) : "";
+  const message = error instanceof Error ? error.message : "";
+  if (code === "ENOTFOUND" || message.includes("getaddrinfo ENOTFOUND")) {
+    return "The SQL agent cannot reach the production database host. In Vercel, set READONLY_DATABASE_URL to Supabase's pooler connection string, not the direct db.<project>.supabase.co host.";
+  }
+  return null;
 }
 
 function inferDateRange(question: string): AgentContext["dateRange"] | undefined {
@@ -159,6 +169,7 @@ async function generateGroqJson(prompt: string, temperature: number) {
       model: groqModel,
       messages: [{ role: "user", content: prompt }],
       temperature,
+      max_tokens: 900,
       response_format: { type: "json_object" },
     }),
   });
@@ -428,6 +439,8 @@ async function answerWithSqlAgent(question: string, messages: AgentMessage[], us
       const result = await executeArmSetsLastMonth(userId);
       return await summarise(question, messages, result.rows, result.sql, { ...context, muscleGroup: "arms", dateRange: result.range }, "summary");
     } catch (error) {
+      const connectionMessage = databaseConnectionMessage(error);
+      if (connectionMessage) return { answer: connectionMessage, breakdown: [], context } satisfies AgentAnswer;
       console.error("Deterministic arm sets query failed", error);
     }
   }
@@ -461,6 +474,8 @@ async function answerWithSqlAgent(question: string, messages: AgentMessage[], us
       }
       return await summarise(question, messages, rows, plan.sql, context, buildSetTables(rows).length ? "set-detail" : "summary");
     } catch (error) {
+      const connectionMessage = databaseConnectionMessage(error);
+      if (connectionMessage) return { answer: connectionMessage, breakdown: [], context } satisfies AgentAnswer;
       const message = error instanceof Error ? error.message : "SQL execution failed";
       rejected = { sql: plan.sql, reason: message.includes("custom_exercises") ? `${message}. The custom_exercises table may not exist in this environment; retry using workout_exercises and exercise_catalog/name fallbacks only.` : message };
       console.error("SQL agent query failed", error, plan.sql);

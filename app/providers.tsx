@@ -35,8 +35,12 @@ function setMetaContent(selector: string, name: string, content: string) {
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(readStoredTheme);
-  const [resolvedTheme, setResolvedTheme] = useState<"dark" | "light">(() => resolveTheme(readStoredTheme()));
+  const [theme, setTheme] = useState<Theme>("light");
+  const [resolvedTheme, setResolvedTheme] = useState<"dark" | "light">("light");
+
+  useEffect(() => {
+    setTheme(readStoredTheme());
+  }, []);
 
   useEffect(() => {
     const updateDocumentTheme = () => {
