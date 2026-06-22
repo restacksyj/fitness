@@ -7,7 +7,7 @@ import { format } from "date-fns";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DayPicker } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Moon, Plus, RefreshCw, Save, Search, Send, Sun, TrendingUp, Trash2, Weight, X } from "lucide-react";
+import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Minus, Moon, Plus, RefreshCw, Save, Search, Send, Sun, TrendingUp, Trash2, Weight, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type CustomExercise, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
@@ -1622,6 +1622,20 @@ export default function Home() {
     }));
   }
 
+  function adjustQueuedSetReps(exerciseId: string, setId: string, delta: number) {
+    setWorkoutQueue((prev) => prev.map((exercise) => {
+      if (exercise.id !== exerciseId) return exercise;
+      return {
+        ...exercise,
+        sets: exercise.sets.map((set) => {
+          if (set.id !== setId) return set;
+          const current = Number(set.reps) || 0;
+          return { ...set, reps: String(Math.max(0, current + delta)) };
+        }),
+      };
+    }));
+  }
+
   function reorderQueuedSets(exerciseId: string, fromId: string, toId: string) {
     if (!fromId || !toId || fromId === toId) return;
     setWorkoutQueue((prev) =>
@@ -1838,11 +1852,11 @@ export default function Home() {
                         </div>
                       )}
                       <div className="queued-set-table">
-                        <div className="set-grid queued-set-grid table-head" style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(76px,1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 430 }} aria-hidden="true">
+                        <div className="set-grid queued-set-grid table-head" style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 450 }} aria-hidden="true">
                           <span></span>
                           <span>Set</span>
                           <span>Weight</span>
-                          <span>Reps</span>
+                          <span>0</span>
                           <span>Last best</span>
                           <span>Notes</span>
                           <span></span>
@@ -1850,7 +1864,7 @@ export default function Home() {
                         {exercise.sets.map((set, index) => (
                           <div
                             className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
-                            style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(76px,1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 430 }}
+                            style={{ gridTemplateColumns: "24px 32px minmax(76px,1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 450 }}
                             key={set.id}
                             onDragOver={(event) => {
                               event.preventDefault();
@@ -1884,7 +1898,32 @@ export default function Home() {
                             </button>
                             <span className="set-number">{index + 1}</span>
                             <input className="input" inputMode="decimal" aria-label={`${exercise.name} set ${index + 1} weight in lbs`} placeholder="lbs" value={set.weight} onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, "") })} />
-                            <input className="input" inputMode="numeric" aria-label={`${exercise.name} set ${index + 1} reps`} placeholder="Reps" value={set.reps} onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })} />
+                            <div className="reps-control">
+                              <input
+                                className="input reps-input"
+                                inputMode="numeric"
+                                aria-label={`${exercise.name} set ${index + 1} reps`}
+                                placeholder="Reps"
+                                value={set.reps}
+                                onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })}
+                              />
+                              <button
+                                className="reps-step-btn reps-step-btn-left"
+                                type="button"
+                                aria-label={`Decrease ${exercise.name} set ${index + 1} reps`}
+                                onClick={() => adjustQueuedSetReps(exercise.id, set.id, -1)}
+                              >
+                                <Minus size={14} />
+                              </button>
+                              <button
+                                className="reps-step-btn reps-step-btn-right"
+                                type="button"
+                                aria-label={`Increase ${exercise.name} set ${index + 1} reps`}
+                                onClick={() => adjustQueuedSetReps(exercise.id, set.id, 1)}
+                              >
+                                <Plus size={14} />
+                              </button>
+                            </div>
                             <span className="last-best">{lastBestForSet(exercise.name, index + 1)}</span>
                             <input className="input set-notes-input" aria-label={`${exercise.name} set ${index + 1} notes`} placeholder="Notes" value={set.notes ?? ""} onChange={(event) => updateQueuedSet(exercise.id, set.id, { notes: event.target.value })} />
                             <button className="bare-icon-btn" style={{ width: 24, minWidth: 24 }} aria-label={`Remove ${exercise.name} set ${index + 1}`} onClick={() => removeQueuedSet(exercise.id, set.id)}><X size={14} /></button>
