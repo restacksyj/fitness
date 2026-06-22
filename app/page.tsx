@@ -1856,7 +1856,7 @@ export default function Home() {
                           <span></span>
                           <span>Set</span>
                           <span>Weight</span>
-                          <span>0</span>
+                          <span>Reps</span>
                           <span>Last best</span>
                           <span>Notes</span>
                           <span></span>
@@ -1903,7 +1903,7 @@ export default function Home() {
                                 className="input reps-input"
                                 inputMode="numeric"
                                 aria-label={`${exercise.name} set ${index + 1} reps`}
-                                placeholder="Reps"
+                                placeholder="0"
                                 value={set.reps}
                                 onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })}
                               />
