@@ -17,7 +17,7 @@ import { useTheme } from "./providers";
 type WorkoutWithExercises = Workout & { workout_exercises: WorkoutExercise[] };
 type ExerciseTrackerDraft = { exerciseName: string; sets: SetRow[] };
 type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" | "custom" };
-type MuscleCatalogItem = Pick<ExerciseCatalogItem, "name" | "muscles" | "muscles_secondary">;
+type MuscleCatalogItem = Pick<ExerciseCatalogItem, "name" | "muscles" | "muscles_secondary" | "image_url">;
 type AgentTable = { title: string; columns: string[]; rows: string[][] };
 type AgentContext = {
   exerciseNames?: string[];
@@ -29,13 +29,14 @@ type AgentContext = {
 };
 type AgentAnswer = { answer: string; breakdown?: Array<{ label: string; value: number; unit: string }>; tables?: AgentTable[]; context?: AgentContext };
 type AgentChatMessage = { id: string; role: "user" | "assistant"; content: string; breakdown?: AgentAnswer["breakdown"]; tables?: AgentTable[] };
-type EditableWorkoutExercise = { id: string; name: string; setRows: WorkoutSetRow[]; isNew?: boolean };
+type EditableWorkoutExercise = { id: string; name: string; setRows: WorkoutSetRow[]; image_url?: string | null; isNew?: boolean };
 type OfflineWorkoutPayload = { name: string; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
 type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on: string; notes: string | null };
 
 const TRACKER_DRAFT_KEY = "progressfit-exercise-tracker-draft";
 const formatWorkoutName = (date = new Date()) => date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
-const normalise = (name: string) => name.trim().toLowerCase();
+const normalise = (name: string) => name.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ").replace(/\btriceps\b/g, "tricep");
+const exerciseSearchVariants = (name: string) => Array.from(new Set([name.trim(), name.trim().replace(/\btriceps\b/gi, "tricep"), name.trim().replace(/\btricep\b/gi, "triceps")].filter(Boolean)));
 const blankTrackerSets = () => [blankSet()];
 const PAGE_SIZE = 10;
 const WEIGHT_PAGE_SIZE = 10;
@@ -138,6 +139,7 @@ export default function Home() {
   const [currentWorkoutId, setCurrentWorkoutId] = useState("");
   const [workoutQueue, setWorkoutQueue] = useState<ExerciseDraft[]>([]);
   const [history, setHistory] = useState<WorkoutExercise[]>([]);
+  const [draftExerciseHistory, setDraftExerciseHistory] = useState<WorkoutExercise[]>([]);
   const [catalogSuggestions, setCatalogSuggestions] = useState<ExerciseSuggestion[]>([]);
   const [selectedExerciseMeta, setSelectedExerciseMeta] = useState<ExerciseSuggestion | null>(null);
   const [customExerciseModalOpen, setCustomExerciseModalOpen] = useState(false);
@@ -175,7 +177,7 @@ export default function Home() {
   const [pendingDeleteWorkout, setPendingDeleteWorkout] = useState<WorkoutWithExercises | null>(null);
   const [pendingRemoveExercise, setPendingRemoveExercise] = useState<ExerciseDraft | null>(null);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
-  const [selectedWorkoutId, setSelectedWorkoutId] = useState("");
+  const [expandedWorkoutIds, setExpandedWorkoutIds] = useState<string[]>([]);
   const [expandedWorkoutExerciseIds, setExpandedWorkoutExerciseIds] = useState<string[]>([]);
   const [isExerciseSearchFocused, setIsExerciseSearchFocused] = useState(false);
   const [expandedHistoryExerciseIds, setExpandedHistoryExerciseIds] = useState<string[]>([]);
@@ -260,6 +262,7 @@ export default function Home() {
       if (user) loadData(user.id);
       else {
         setHistory([]);
+        setDraftExerciseHistory([]);
         setRecentWorkouts([]);
         setBodyWeights([]);
         setBodyWeightHistory([]);
@@ -491,7 +494,7 @@ export default function Home() {
     async function loadMuscleCatalog() {
       const { data, error } = await supabase
         .from("exercise_catalog")
-        .select("name,muscles,muscles_secondary")
+        .select("name,muscles,muscles_secondary,image_url")
         .in("name", names)
         .limit(500);
 
@@ -516,6 +519,10 @@ export default function Home() {
       cancelled = true;
     };
   }, [recentWorkouts, userKey]);
+
+  useEffect(() => {
+    loadDraftExerciseHistory([...workoutQueue.map((exercise) => exercise.name), exerciseName]);
+  }, [exerciseName, workoutQueue.map((exercise) => normalise(exercise.name)).join("|"), userKey]);
 
   async function signInWithEmail() {
     const email = authEmail.trim();
@@ -586,6 +593,7 @@ export default function Home() {
     setUserKey("");
     setAuthUserEmail("");
     setHistory([]);
+    setDraftExerciseHistory([]);
     setRecentWorkouts([]);
     setBodyWeights([]);
     setBodyWeightHistory([]);
@@ -662,14 +670,13 @@ export default function Home() {
 
     const suggestion = customSuggestion(data as Pick<CustomExercise, "id" | "name" | "category" | "muscles" | "equipment">);
     if (customExerciseTarget === "tracker") {
-      setExerciseName(suggestion.name);
-      setSelectedExerciseMeta(suggestion);
+      addToWorkout(suggestion.name, suggestion);
       setCatalogSuggestions([]);
     } else if (customExerciseTarget === "progress") {
       setProgressExercise(suggestion.name);
       setProgressCatalogSuggestions([]);
     } else if (customExerciseTarget === "edit" && activeEditExerciseId) {
-      updateEditWorkoutExercise(activeEditExerciseId, { name: suggestion.name });
+      updateEditWorkoutExercise(activeEditExerciseId, { name: suggestion.name, image_url: suggestion.image_url });
       setEditExerciseSuggestions([]);
     }
     setCustomExerciseModalOpen(false);
@@ -779,10 +786,36 @@ export default function Home() {
       .select("*")
       .eq("user_key", key)
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(50);
 
     if (error) return console.error(error.message);
     setHistory(data ?? []);
+  }
+
+  async function loadDraftExerciseHistory(names: string[], key = userKey) {
+    const uniqueNames = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
+    if (!key || !isSupabaseConfigured || !uniqueNames.length) {
+      setDraftExerciseHistory([]);
+      return;
+    }
+
+    const queries = uniqueNames.flatMap(exerciseSearchVariants).map((name) => supabase
+      .from("workout_exercises")
+      .select("*")
+      .eq("user_key", key)
+      .ilike("exercise_name", `%${name}%`)
+      .order("created_at", { ascending: false })
+      .limit(10));
+
+    const results = await Promise.all(queries);
+    const firstError = results.find((result) => result.error)?.error;
+    if (firstError) return console.error(firstError.message);
+    const allowedNames = new Set(uniqueNames.map(normalise));
+    const rows = new Map<string, WorkoutExercise>();
+    results.flatMap((result) => (result.data ?? []) as WorkoutExercise[]).forEach((row) => {
+      if (allowedNames.has(normalise(row.exercise_name))) rows.set(row.id, row);
+    });
+    setDraftExerciseHistory(Array.from(rows.values()).sort((a, b) => b.created_at.localeCompare(a.created_at)));
   }
 
   async function loadRecentWorkouts(key = userKey) {
@@ -827,9 +860,19 @@ export default function Home() {
     setBodyWeightHistory((data ?? []) as BodyWeight[]);
   }
 
+  const exerciseHistoryRows = useMemo(() => {
+    const rows = new Map<string, WorkoutExercise>();
+    [...draftExerciseHistory, ...history].forEach((row) => rows.set(row.id, row));
+    return Array.from(rows.values());
+  }, [draftExerciseHistory, history]);
+
   const exerciseNames = useMemo(() => {
-    return Array.from(new Set(history.map((h) => h.exercise_name)));
-  }, [history]);
+    return Array.from(new Set(exerciseHistoryRows.map((h) => h.exercise_name)));
+  }, [exerciseHistoryRows]);
+
+  const workoutExerciseMeta = useMemo(() => {
+    return new Map(muscleCatalog.map((exercise) => [normalise(exercise.name), exercise]));
+  }, [muscleCatalog]);
 
   const exerciseSuggestions = useMemo(() => {
     const q = normalise(exerciseName);
@@ -855,8 +898,8 @@ export default function Home() {
   const selectedHistory = useMemo(() => {
     const key = normalise(exerciseName);
     if (!key) return [];
-    return history.filter((h) => normalise(h.exercise_name) === key);
-  }, [history, exerciseName]);
+    return exerciseHistoryRows.filter((h) => normalise(h.exercise_name) === key);
+  }, [exerciseHistoryRows, exerciseName]);
 
   const filteredWorkouts = useMemo(() => {
     const q = normalise(workoutSearch);
@@ -871,7 +914,6 @@ export default function Home() {
   const workoutTotalPages = Math.max(1, Math.ceil(filteredWorkouts.length / PAGE_SIZE));
   const safeWorkoutPage = Math.min(workoutPage, workoutTotalPages - 1);
   const workoutRows = filteredWorkouts.slice(safeWorkoutPage * PAGE_SIZE, safeWorkoutPage * PAGE_SIZE + PAGE_SIZE);
-  const selectedWorkout = recentWorkouts.find((workout) => workout.id === selectedWorkoutId);
   const hasUnsavedWorkoutExercises = workoutQueue.some((exercise) => !exercise.savedExerciseId);
   const workoutTitle = workoutName.trim() || formatWorkoutName();
   const hasWorkoutNameChanged = workoutTitle !== (savedWorkoutName.trim() || formatWorkoutName());
@@ -1042,7 +1084,7 @@ export default function Home() {
   }, [bodyWeights, progressHistory, progressExercise]);
 
   function lastBestForSet(exerciseName: string, setNumber: number) {
-    const record = history.find((item) => normalise(item.exercise_name) === normalise(exerciseName));
+    const record = exerciseHistoryRows.find((item) => normalise(item.exercise_name) === normalise(exerciseName));
     const row = record?.set_rows?.find((set) => Number(set.set) === setNumber);
     if (row) return `${row.weight}×${row.reps}`;
     if (record && setNumber === 1) return `${record.weight}×${record.reps}`;
@@ -1248,6 +1290,7 @@ export default function Home() {
     setEditWorkoutExercises((workout.workout_exercises ?? []).map((exercise) => ({
       id: exercise.id,
       name: exercise.exercise_name,
+      image_url: workoutExerciseMeta.get(normalise(exercise.exercise_name))?.image_url ?? null,
       setRows: (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }]).map((set, index) => ({
         set: index + 1,
         reps: Number(set.reps),
@@ -1354,7 +1397,7 @@ export default function Home() {
     if (!data?.length) return alert("Could not delete workout. Apply the latest Supabase schema so workouts can be deleted.");
 
     setPendingDeleteWorkout(null);
-    if (selectedWorkoutId === workout.id) setSelectedWorkoutId("");
+    setExpandedWorkoutIds((current) => current.filter((id) => id !== workout.id));
     setRecentWorkouts((current) => current.filter((row) => row.id !== workout.id));
     setHistory((current) => current.filter((row) => row.workout_id !== workout.id));
     await loadRecentWorkouts();
@@ -1552,7 +1595,7 @@ export default function Home() {
     if (error || !savedExercise) return alert(error?.message ?? "Could not save");
 
     setWorkoutQueue((prev) => prev.map((item) => item.id === exercise.id ? { ...item, savedExerciseId: savedExercise.id } : item));
-    setSelectedWorkoutId(workoutId);
+    setExpandedWorkoutIds((current) => current.includes(workoutId) ? current : [...current, workoutId]);
     await loadData();
     setToast(`${name} saved`);
     setTimeout(() => setToast(""), 2200);
@@ -1592,7 +1635,7 @@ export default function Home() {
       return false;
     }
 
-    setSelectedWorkoutId(workout.id);
+    setExpandedWorkoutIds((current) => current.includes(workout.id) ? current : [...current, workout.id]);
     await loadData();
     setToast("Saved. Nice work 💪");
     setTimeout(() => setToast(""), 2400);
@@ -1794,7 +1837,7 @@ export default function Home() {
               const volume = rows.reduce((sum, set) => sum + set.reps * set.weight, 0);
               const isCollapsed = collapsedQueueIds.includes(exercise.id);
               const meta = [exercise.category, exercise.muscles?.[0], exercise.equipment?.[0]].filter(Boolean).join(" • ");
-              const exerciseHistory = history.filter((record) => normalise(record.exercise_name) === normalise(exercise.name)).slice(0, 3);
+              const exerciseHistory = exerciseHistoryRows.filter((record) => normalise(record.exercise_name) === normalise(exercise.name)).slice(0, 3);
               const isHistoryOpen = expandedHistoryExerciseIds.includes(exercise.id);
               return (
                 <div className="workout-exercise-section" key={exercise.id}>
@@ -2020,13 +2063,13 @@ export default function Home() {
                   </thead>
                   <tbody>
                     {workoutRows.map((workout) => {
-                      const isExpanded = selectedWorkoutId === workout.id;
+                      const isExpanded = expandedWorkoutIds.includes(workout.id);
                       const isEditingWorkout = editingWorkoutId === workout.id;
                       const exercises = workout.workout_exercises ?? [];
                       const volume = exercises.reduce((sum, exercise) => sum + Number(exercise.volume || 0), 0);
                       return (
                         <Fragment key={workout.id}>
-                          <tr className="clickable-table-row" onClick={() => setSelectedWorkoutId(isExpanded ? "" : workout.id)}>
+                          <tr className="clickable-table-row" onClick={() => setExpandedWorkoutIds((current) => isExpanded ? current.filter((id) => id !== workout.id) : [...current, workout.id])}>
                             <td>
                               <button className="table-toggle" aria-label={isExpanded ? "Collapse workout" : "Expand workout"}>
                                 <ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={16} />
@@ -2043,7 +2086,7 @@ export default function Home() {
                                   aria-label={`Edit ${workout.name || "workout"}`}
                                   onClick={(event) => {
                                     event.stopPropagation();
-                                    setSelectedWorkoutId(workout.id);
+                                    setExpandedWorkoutIds((current) => current.includes(workout.id) ? current : [...current, workout.id]);
                                     startEditWorkout(workout);
                                   }}
                                 >
@@ -2093,28 +2136,33 @@ export default function Home() {
                                         const originalExercise = exercises.find((item) => item.id === exercise.id);
                                         const exerciseNameValue = isEditingWorkout ? (exercise as EditableWorkoutExercise).name : (exercise as WorkoutExercise).exercise_name;
                                         const setRows = !isEditingWorkout && "set_rows" in exercise ? (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }]) : [];
-                                        const displayRows = isEditingWorkout && editExercise ? editExercise.setRows : setRows;
-                                        const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id);
-                                        const summaryRows = displayRows.filter((set) => Number(set.reps) > 0 && Number(set.weight) >= 0);
-                                        const bestRow = summaryRows.reduce<WorkoutSetRow | null>((best, set) => !best || Number(set.weight) > Number(best.weight) ? set : best, null);
-                                        return (
+                                         const displayRows = isEditingWorkout && editExercise ? editExercise.setRows : setRows;
+                                         const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id);
+                                         const summaryRows = displayRows.filter((set) => Number(set.reps) > 0 && Number(set.weight) >= 0);
+                                         const bestRow = summaryRows.reduce<WorkoutSetRow | null>((best, set) => !best || Number(set.weight) > Number(best.weight) ? set : best, null);
+                                         const exerciseMeta = workoutExerciseMeta.get(normalise(exerciseNameValue));
+                                         const exerciseImageUrl = isEditingWorkout && editExercise ? editExercise.image_url ?? exerciseMeta?.image_url : exerciseMeta?.image_url;
+                                         return (
                                            <div
                                              className="record-detail-panel recent-record-panel"
                                               key={exercise.id}
                                              style={{ border: "1px solid var(--line)", borderRadius: 14, padding: 14 }}
                                            >
-                                            <div style={{ display: "grid", gridTemplateColumns: isEditingWorkout ? "1fr auto" : "1fr", gap: 8, alignItems: "center" }}>
+                                            <div style={{ display: "grid", gridTemplateColumns: isEditingWorkout ? (isMobileView ? "auto auto minmax(0, 1fr) auto" : "1fr auto") : "1fr", gap: 8, alignItems: "start" }}>
                                               {isEditingWorkout && editExercise ? (
-                                                <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", gap: 8, alignItems: "center", width: "100%" }}>
-                                                  <button className="bare-icon-btn" aria-label={isExerciseExpanded ? `Collapse ${exerciseNameValue || "exercise"}` : `Expand ${exerciseNameValue || "exercise"}`} onClick={() => setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}>
-                                                    <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
-                                                  </button>
-                                                  <div className="input-icon-wrap search-combo" style={{ display: "block", minWidth: 0 }}>
-                                                    <input className="detail-input" value={editExercise.name} placeholder="Search exercise" onFocus={() => setActiveEditExerciseId(exercise.id)} onBlur={() => setTimeout(() => { setActiveEditExerciseId(""); setEditExerciseSuggestions([]); }, 120)} onChange={(event) => { setActiveEditExerciseId(exercise.id); updateEditWorkoutExercise(exercise.id, { name: event.target.value }); }} />
+                                                <div style={{ display: isMobileView ? "contents" : "grid", gridTemplateColumns: "auto auto minmax(0, 1fr) auto", gap: 8, alignItems: "center", width: "100%" }}>
+                                                   <button className="bare-icon-btn" aria-label={isExerciseExpanded ? `Collapse ${exerciseNameValue || "exercise"}` : `Expand ${exerciseNameValue || "exercise"}`} onClick={() => setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}>
+                                                     <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
+                                                   </button>
+                                                   <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, minWidth: 34, borderRadius: 12, border: "1px solid var(--line)", background: "var(--panel2)", overflow: "hidden" }}>
+                                                     {exerciseImageUrl ? <img src={exerciseImageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} /> : <Dumbbell size={17} />}
+                                                   </span>
+                                                   <div className="input-icon-wrap search-combo" style={{ display: "block", minWidth: 0 }}>
+                                                     <input className="detail-input" value={editExercise.name} placeholder="Search exercise" onFocus={() => setActiveEditExerciseId(exercise.id)} onBlur={() => setTimeout(() => { setActiveEditExerciseId(""); setEditExerciseSuggestions([]); }, 120)} onChange={(event) => { setActiveEditExerciseId(exercise.id); updateEditWorkoutExercise(exercise.id, { name: event.target.value, image_url: null }); }} />
                                                     {activeEditExerciseId === exercise.id && editExercise.name.trim().length >= 2 && (
-                                                      <div className="exercise-suggestions" role="listbox">
+                                                      <div className="exercise-suggestions" role="listbox" style={{ position: "static", marginTop: 8, width: "100%", maxWidth: "100%" }}>
                                                         {editExerciseSuggestions.map((suggestion) => (
-                                                          <div className="exercise-suggestion-item" key={`${suggestion.source}-${suggestion.id}`} role="option" tabIndex={0} onMouseDown={(event) => { event.preventDefault(); updateEditWorkoutExercise(exercise.id, { name: suggestion.name }); setEditExerciseSuggestions([]); setActiveEditExerciseId(""); }}>
+                                                          <div className="exercise-suggestion-item" key={`${suggestion.source}-${suggestion.id}`} role="option" tabIndex={0} onMouseDown={(event) => { event.preventDefault(); updateEditWorkoutExercise(exercise.id, { name: suggestion.name, image_url: suggestion.image_url }); setEditExerciseSuggestions([]); setActiveEditExerciseId(""); }}>
                                                             <span className="exercise-suggestion-icon">{suggestion.image_url ? <img src={suggestion.image_url} alt="" /> : <Dumbbell size={17} />}</span>
                                                             <span className="exercise-suggestion-copy"><span>{suggestion.name}</span><small>{[suggestion.category, suggestion.muscles?.[0], suggestion.equipment?.[0]].filter(Boolean).join(" • ")}</small></span>
                                                           </div>
@@ -2128,14 +2176,19 @@ export default function Home() {
                                                       </div>
                                                     )}
                                                   </div>
-                                                  <span className="muted" style={{ whiteSpace: "nowrap" }}>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>
+                                                  {!isMobileView && <span className="muted" style={{ whiteSpace: "nowrap" }}>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>}
                                                 </div>
                                               ) : (
-                                                <button className="record-summary-toggle" onClick={() => setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}>
-                                                  <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
-                                                  <span>{exerciseNameValue}</span>
-                                                  <span>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>
-                                                </button>
+                                                 <button className="record-summary-toggle" style={{ display: "grid", gridTemplateColumns: "auto auto minmax(0, 1fr)", justifyContent: "start", justifyItems: "start", textAlign: "left", width: "100%" }} onClick={() => setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}>
+                                                   <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={18} />
+                                                   <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, minWidth: 34, borderRadius: 12, border: "1px solid var(--line)", background: "var(--panel2)", overflow: "hidden" }}>
+                                                     {exerciseImageUrl ? <img src={exerciseImageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} /> : <Dumbbell size={17} />}
+                                                   </span>
+                                                   <span style={{ display: "grid", gap: 3, minWidth: 0, justifyItems: "start", textAlign: "left" }}>
+                                                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{exerciseNameValue}</span>
+                                                     {!isMobileView && <span className="muted">{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</span>}
+                                                   </span>
+                                                 </button>
                                               )}
                                               {isEditingWorkout && <button className="bare-icon-btn" aria-label={`Delete ${exerciseNameValue || "exercise"}`} onClick={() => removeEditWorkoutExercise(exercise.id)}><Trash2 size={15} /></button>}
                                             </div>
@@ -2143,6 +2196,8 @@ export default function Home() {
                                               <>
                                                 <div className="record-detail-meta">
                                                   <span>{originalExercise?.volume ?? 0} lbs volume</span>
+                                                  <span>{displayRows.length} {displayRows.length === 1 ? "set" : "sets"}</span>
+                                                  {bestRow && <span>Best {bestRow.weight} lbs × {bestRow.reps}</span>}
                                                   {!isEditingWorkout && <Link href={`/history?exercise=${encodeURIComponent(exerciseNameValue.trim())}`}>View records</Link>}
                                                 </div>
                                                 <div className="set-detail-table">

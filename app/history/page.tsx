@@ -3,14 +3,15 @@
 import Link from "next/link";
 import * as Dialog from "@radix-ui/react-dialog";
 import { format } from "date-fns";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
 import { ArrowLeft, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Plus, Search, Trash2, X } from "lucide-react";
 import { isSupabaseConfigured, supabase, type ExerciseCatalogItem, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
 
 const PAGE_SIZE = 10;
-const normalise = (name: string) => name.trim().toLowerCase();
+const normalise = (name: string) => name.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ").replace(/\btriceps\b/g, "tricep");
+const exerciseSearchVariants = (name: string) => Array.from(new Set([name.trim(), name.trim().replace(/\btriceps\b/gi, "tricep"), name.trim().replace(/\btricep\b/gi, "triceps")].filter(Boolean)));
 type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" };
 
 function inputDateToDate(value: string) {
@@ -66,10 +67,12 @@ export default function HistoryPage() {
     const [dateFrom, setDateFrom] = useState("");
     const [dateTo, setDateTo] = useState("");
     const [page, setPage] = useState(0);
+    const [historyCount, setHistoryCount] = useState(0);
     const [expandedRecordId, setExpandedRecordId] = useState("");
     const [editingRecordId, setEditingRecordId] = useState("");
     const [editRows, setEditRows] = useState<WorkoutSetRow[]>([]);
     const [pendingDeleteRecord, setPendingDeleteRecord] = useState<WorkoutExercise | null>(null);
+    const historyRequestId = useRef(0);
 
     useEffect(() => {
         const exercise = new URLSearchParams(window.location.search).get("exercise") ?? "";
@@ -81,10 +84,16 @@ export default function HistoryPage() {
             const user = data.user;
             if (!user) return;
             setUserKey(user.id);
-            loadHistory(user.id);
+            loadHistory(user.id, exercise, 0);
         }
         initAuth();
     }, []);
+
+    useEffect(() => {
+        if (!userKey) return;
+        const timeout = window.setTimeout(() => loadHistory(userKey, search, page), 180);
+        return () => window.clearTimeout(timeout);
+    }, [dateFrom, dateTo, page, search, userKey]);
 
     useEffect(() => {
         const query = search.trim();
@@ -118,17 +127,29 @@ export default function HistoryPage() {
         };
     }, [search]);
 
-    async function loadHistory(key = userKey) {
+    async function loadHistory(key = userKey, searchValue = search, pageValue = page) {
         if (!key || !isSupabaseConfigured) return;
-        const { data, error } = await supabase
+        const requestId = historyRequestId.current + 1;
+        historyRequestId.current = requestId;
+        const query = searchValue.trim();
+        const from = pageValue * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+        let request = supabase
             .from("workout_exercises")
-            .select("*")
+            .select("*", { count: "exact" })
             .eq("user_key", key)
-            .order("created_at", { ascending: false })
-            .limit(10);
+            .order("created_at", { ascending: false });
 
+        if (query.length >= 2) request = request.or(exerciseSearchVariants(query).map((name) => `exercise_name.ilike.%${name}%`).join(","));
+        if (dateFrom) request = request.gte("created_at", `${dateFrom}T00:00:00`);
+        if (dateTo) request = request.lte("created_at", `${dateTo}T23:59:59`);
+
+        const { data, error, count } = await request.range(from, to);
+
+        if (requestId !== historyRequestId.current) return;
         if (error) return console.error(error.message);
         setHistory(data ?? []);
+        setHistoryCount(count ?? 0);
     }
 
     const exerciseNames = useMemo(() => {
@@ -156,23 +177,9 @@ export default function HistoryPage() {
         return Array.from(suggestions.values()).slice(0, 8);
     }, [catalogSuggestions, exerciseNames, search]);
 
-    const filteredHistory = useMemo(() => {
-        const q = normalise(search);
-        const fromTime = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : null;
-        const toTime = dateTo ? new Date(`${dateTo}T23:59:59`).getTime() : null;
-
-        return history.filter((record) => {
-            const recordTime = new Date(record.created_at).getTime();
-            const matchesSearch = !q || normalise(record.exercise_name).includes(q);
-            const matchesFrom = fromTime === null || recordTime >= fromTime;
-            const matchesTo = toTime === null || recordTime <= toTime;
-            return matchesSearch && matchesFrom && matchesTo;
-        });
-    }, [dateFrom, dateTo, history, search]);
-
-    const totalPages = Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE));
+    const totalPages = Math.max(1, Math.ceil(historyCount / PAGE_SIZE));
     const safePage = Math.min(page, totalPages - 1);
-    const pageRows = filteredHistory.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+    const pageRows = history;
 
     function updateSearch(value: string) {
         setSearch(value);
