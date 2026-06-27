@@ -49,6 +49,7 @@ const CUSTOM_EXERCISE_MUSCLES = ["Biceps", "Triceps", "Forearms", "Chest", "Lats
 const CUSTOM_EXERCISE_EQUIPMENT = ["Barbell", "Dumbbell", "Cable", "Machine", "Smith machine", "Bodyweight", "Bench", "Kettlebell", "Resistance band", "Other"] as const;
 type MuscleGroup = typeof MUSCLE_GROUPS[number];
 const estimateOneRepMax = (weight: number, reps: number) => Math.round(weight * (1 + reps / 30));
+const poundsToKilograms = (weight: number) => Number((weight * 0.45359237).toFixed(1));
 const offlineId = (type: "weight" | "exercise" | "workout", id: number) => `offline-${type}-${id}`;
 const offlineQueueIdFrom = (id: string) => Number(id.split("-").at(-1));
 
@@ -952,6 +953,7 @@ export default function Home() {
   const safeWeightPage = Math.min(weightPage, weightTotalPages - 1);
   const weightRows = bodyWeights;
   const currentBodyWeight = bodyWeights[0]?.weight ?? null;
+  const weightKilograms = weightValue && Number.isFinite(Number(weightValue)) ? `${poundsToKilograms(Number(weightValue))} kg` : "";
   const weightChartData = useMemo(() => bodyWeightHistory.map((row) => ({
     date: new Date(`${row.measured_on}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
     measuredOn: row.measured_on,
@@ -2455,7 +2457,10 @@ export default function Home() {
             {editingWeightId && <div className="sync-status" style={{ marginBottom: 0 }}><span>Editing weight entry</span><span>{weightDate}</span></div>}
             <div className="date-filters">
               <DatePickerField label="Weight date" value={weightDate} onChange={setWeightDate} />
-              <input ref={weightInputRef} className="input" inputMode="decimal" placeholder="Weight (lbs)" value={weightValue} onChange={(event) => setWeightValue(event.target.value.replace(/[^0-9.]/g, ""))} />
+              <div className="weight-input-wrap">
+                <input ref={weightInputRef} className="input weight-input" inputMode="decimal" placeholder="Weight (lbs)" value={weightValue} onChange={(event) => setWeightValue(event.target.value.replace(/[^0-9.]/g, ""))} />
+                {weightKilograms && <span className="weight-kg-conversion">{weightKilograms}</span>}
+              </div>
             </div>
             <input className="input" placeholder="Notes (optional)" value={weightNotes} onChange={(event) => setWeightNotes(event.target.value)} />
             <div className="row action-row">
