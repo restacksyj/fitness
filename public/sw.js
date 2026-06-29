@@ -1,5 +1,5 @@
 const CACHE = "progressfit-v2";
-const ASSETS = ["/", "/manifest.webmanifest", "/icon.svg"];
+const ASSETS = ["/", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
