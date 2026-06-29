@@ -1093,6 +1093,17 @@ export default function Home() {
     return "—";
   }
 
+  function bestPerformedSet(record: WorkoutExercise) {
+    const rows = record.set_rows?.length ? record.set_rows : [{ set: 1, reps: record.reps, weight: record.weight }];
+    return rows.reduce<{ reps: number; weight: number } | null>((best, set) => {
+      const reps = Number(set.reps);
+      const weight = Number(set.weight);
+      if (!Number.isFinite(reps) || !Number.isFinite(weight)) return best;
+      if (!best || weight > best.weight || (weight === best.weight && reps > best.reps)) return { reps, weight };
+      return best;
+    }, null);
+  }
+
   function validSetRows(sourceSets = sets) {
     return sourceSets
       .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: set.weight === "" ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
@@ -1726,7 +1737,6 @@ export default function Home() {
       <header className="hero app-hero">
         <div>
           <h1>ProgressFit</h1>
-          <p>Track exercises, workouts, and body weight.</p>
         </div>
         <div className="hero-actions">
           <button className="bare-icon-btn hero-auth-btn theme-toggle" aria-label={`Theme: ${theme}. Switch theme`} title={`Theme: ${theme}`} onClick={cycleTheme}>
@@ -1875,12 +1885,13 @@ export default function Home() {
                           </div>
                           {isHistoryOpen && exerciseHistory.map((record) => {
                             const isExpanded = expandedRecentRecordId === record.id;
+                            const bestSet = bestPerformedSet(record);
                             return (
                               <div className="record-detail-panel recent-record-panel" key={record.id}>
                                 <button className="record-summary-toggle" onClick={() => setExpandedRecentRecordId(isExpanded ? "" : record.id)}>
                                   <ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={18} />
                                   <span>{new Date(record.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</span>
-                                  <span>{record.sets} {record.sets === 1 ? "set" : "sets"} • best {record.weight} lbs × {record.reps}</span>
+                                  <span>{record.sets} {record.sets === 1 ? "set" : "sets"}{bestSet ? ` • best ${bestSet.weight} lbs × ${bestSet.reps}` : ""}</span>
                                 </button>
                                 {isExpanded && (
                                   <>
@@ -1911,7 +1922,7 @@ export default function Home() {
                         </div>
                       )}
                       <div className="queued-set-table">
-                        <div className="set-grid queued-set-grid table-head" style={{ gridTemplateColumns: "24px 32px minmax(100px,1.1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 474 }} aria-hidden="true">
+                        <div className="set-grid queued-set-grid table-head" style={{ gridTemplateColumns: "24px 32px minmax(124px,1.2fr) minmax(124px,1.2fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 522 }} aria-hidden="true">
                           <span></span>
                           <span>Set</span>
                           <span>Weight</span>
@@ -1923,7 +1934,7 @@ export default function Home() {
                         {exercise.sets.map((set, index) => (
                           <div
                             className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
-                            style={{ gridTemplateColumns: "24px 32px minmax(100px,1.1fr) minmax(100px,1.1fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 474 }}
+                            style={{ gridTemplateColumns: "24px 32px minmax(124px,1.2fr) minmax(124px,1.2fr) minmax(58px,.65fr) minmax(82px,.8fr) 28px", gap: 6, minWidth: 522 }}
                             key={set.id}
                             onDragOver={(event) => {
                               event.preventDefault();
@@ -2078,7 +2089,7 @@ export default function Home() {
                               </button>
                             </td>
                             <td className="workout-name-cell">{workout.name || formatWorkoutName(new Date(workout.created_at))}</td>
-                            <td className="workout-date-cell">{new Date(workout.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</td>
+                            <td className="workout-date-cell">{new Date(workout.created_at).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
                             <td>{exercises.length}</td>
                             <td className="workout-volume-cell">{volume} lbs</td>
                             <td>
