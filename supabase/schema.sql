@@ -3,6 +3,7 @@ create table if not exists public.workouts (
   user_key text not null,
   name text not null default '',
   notes text,
+  duration_seconds int not null default 0 check (duration_seconds >= 0),
   created_at timestamptz not null default now()
 );
 
@@ -21,6 +22,7 @@ create table if not exists public.workout_exercises (
 
 -- Safe migrations if you already ran an older schema.
 alter table public.workouts add column if not exists name text not null default '';
+alter table public.workouts add column if not exists duration_seconds int not null default 0 check (duration_seconds >= 0);
 alter table public.workout_exercises add column if not exists weight numeric not null default 0 check (weight >= 0);
 alter table public.workout_exercises add column if not exists set_rows jsonb;
 alter table public.workout_exercises add column if not exists notes text;

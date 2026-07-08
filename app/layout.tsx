@@ -18,7 +18,6 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     title: "ProgressFit",
-    statusBarStyle: "black-translucent",
   },
 };
 
@@ -29,7 +28,6 @@ export const viewport: Viewport = {
   ],
   width: "device-width",
   initialScale: 1,
-  viewportFit: "cover",
 };
 
 const themeInitScript = `
@@ -42,8 +40,9 @@ const themeInitScript = `
     const themeColor = document.querySelector("meta[name='theme-color']:not([media])") || document.head.appendChild(document.createElement("meta"));
     themeColor.setAttribute("name", "theme-color");
     themeColor.setAttribute("content", resolved === "dark" ? "#111111" : "#ffffff");
-    const statusBar = document.querySelector("meta[name='apple-mobile-web-app-status-bar-style']");
-    statusBar?.setAttribute("content", "black-translucent");
+    const statusBar = document.querySelector("meta[name='apple-mobile-web-app-status-bar-style']") || document.head.appendChild(document.createElement("meta"));
+    statusBar.setAttribute("name", "apple-mobile-web-app-status-bar-style");
+    statusBar.setAttribute("content", resolved === "dark" ? "black" : "default");
   } catch {
     document.documentElement.dataset.theme = "light";
     document.documentElement.style.colorScheme = "light";
@@ -56,7 +55,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <head>
         <Script id="theme-init" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
-      <body>
+      <body suppressHydrationWarning>
         <ThemeProvider>
           <PwaRegister />
           {children}

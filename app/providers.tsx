@@ -13,6 +13,7 @@ type ThemeContextValue = {
 const THEME_STORAGE_KEY = "progressfit-theme";
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 const THEME_COLORS = { light: "#ffffff", dark: "#111111" };
+const IOS_STATUS_BAR_STYLE = { light: "default", dark: "black" };
 
 function readStoredTheme(): Theme {
   if (typeof window === "undefined") return "light";
@@ -49,7 +50,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       document.documentElement.dataset.theme = resolved;
       document.documentElement.style.colorScheme = resolved;
       setMetaContent("meta[name='theme-color']:not([media])", "theme-color", THEME_COLORS[resolved]);
-      setMetaContent("meta[name='apple-mobile-web-app-status-bar-style']", "apple-mobile-web-app-status-bar-style", "black-translucent");
+      setMetaContent("meta[name='apple-mobile-web-app-status-bar-style']", "apple-mobile-web-app-status-bar-style", IOS_STATUS_BAR_STYLE[resolved]);
     };
 
     localStorage.setItem(THEME_STORAGE_KEY, theme);

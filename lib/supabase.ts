@@ -15,6 +15,7 @@ export type Workout = {
   user_key: string;
   name: string | null;
   notes: string | null;
+  duration_seconds?: number | null;
   created_at: string;
 };
 

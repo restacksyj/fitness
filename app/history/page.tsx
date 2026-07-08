@@ -41,8 +41,7 @@ function DateRangePickerField({ from, to, onChange, compact = false }: { from: s
             <Dialog.Portal>
                 <Dialog.Overlay className="dialog-overlay" />
                 <Dialog.Content className="dialog-content date-dialog-content">
-                    <Dialog.Title className="dialog-title">Date range</Dialog.Title>
-                    <Dialog.Description className="dialog-description">Pick a start date. End date is optional.</Dialog.Description>
+                    <Dialog.Title className="sr-only">Date range</Dialog.Title>
                     <DayPicker
                         mode="range"
                         selected={selected}
