@@ -20,6 +20,13 @@ type ExerciseTrackerDraft = { exerciseName: string; sets: SetRow[] };
 type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" | "custom" };
 type MuscleCatalogItem = Pick<ExerciseCatalogItem, "name" | "muscles" | "muscles_secondary" | "image_url">;
 type AgentTable = { title: string; columns: string[]; rows: string[][] };
+type WorkoutSummary = {
+    title: string;
+    duration: string;
+    volume: number;
+    sets: number;
+    exercises: number;
+};
 type AgentContext = {
     exerciseNames?: string[];
     muscleGroup?: string;
@@ -204,6 +211,7 @@ export default function Home() {
     const [workoutStartedAt, setWorkoutStartedAt] = useState(Date.now());
     const [workoutClockTick, setWorkoutClockTick] = useState(Date.now());
     const [draftWorkoutActive, setDraftWorkoutActive] = useState(false);
+    const [finishSummary, setFinishSummary] = useState<WorkoutSummary | null>(null);
     const [workoutQueue, setWorkoutQueue] = useState<ExerciseDraft[]>([]);
     const [history, setHistory] = useState<WorkoutExercise[]>([]);
     const [draftExerciseHistory, setDraftExerciseHistory] = useState<WorkoutExercise[]>([]);
@@ -294,6 +302,22 @@ export default function Home() {
         update();
         query.addEventListener("change", update);
         return () => query.removeEventListener("change", update);
+    }, []);
+
+    useEffect(() => {
+        const updateViewportHeight = () => {
+            const height = window.visualViewport?.height ?? window.innerHeight;
+            document.documentElement.style.setProperty("--app-viewport-height", `${height}px`);
+        };
+        updateViewportHeight();
+        window.visualViewport?.addEventListener("resize", updateViewportHeight);
+        window.visualViewport?.addEventListener("scroll", updateViewportHeight);
+        window.addEventListener("resize", updateViewportHeight);
+        return () => {
+            window.visualViewport?.removeEventListener("resize", updateViewportHeight);
+            window.visualViewport?.removeEventListener("scroll", updateViewportHeight);
+            window.removeEventListener("resize", updateViewportHeight);
+        };
     }, []);
 
     useEffect(() => {
@@ -1421,7 +1445,10 @@ export default function Home() {
             .filter((exercise) => exercise.name && exercise.sets.length);
         const title = titleOverride?.trim() || workoutNameInput.trim() || workoutTitle;
 
-        if (!rows.length) return alert("Add at least one unsaved exercise with a valid set before saving a workout.");
+        if (!rows.length) {
+            alert("Add at least one unsaved exercise with a valid set before saving a workout.");
+            return false;
+        }
 
         if (!navigator.onLine) {
             const queueId = await enqueueOffline({
@@ -1439,7 +1466,7 @@ export default function Home() {
             setWorkoutName(title);
             setToast(`${title} saved offline`);
             setTimeout(() => setToast(""), TOAST_DURATION_MS);
-            return;
+            return true;
         }
 
         setSaving(true);
@@ -1451,7 +1478,8 @@ export default function Home() {
 
         if (workoutError || !workout) {
             setSaving(false);
-            return alert(workoutError?.message ?? "Could not save workout");
+            alert(workoutError?.message ?? "Could not save workout");
+            return false;
         }
 
         const payload = rows.map(({ exercise, name, sets }) => ({
@@ -1469,7 +1497,10 @@ export default function Home() {
 
         const { error } = await supabase.from("workout_exercises").insert(payload);
         setSaving(false);
-        if (error) return alert(error.message);
+        if (error) {
+            alert(error.message);
+            return false;
+        }
 
         setWorkoutNameModalOpen(false);
         setCurrentWorkoutId(workout.id);
@@ -1478,6 +1509,7 @@ export default function Home() {
         await loadData();
         setToast(`${title} saved`);
         setTimeout(() => setToast(""), TOAST_DURATION_MS);
+        return true;
     }
 
     function startEditWorkout(workout: WorkoutWithExercises) {
@@ -1967,6 +1999,61 @@ export default function Home() {
         setFullscreenExerciseId(workoutQueue[0]?.id ?? "workout");
     }
 
+    async function finishWorkout() {
+        const validExercises = workoutQueue
+            .map((exercise) => ({ exercise, rows: validSetRows(exercise.sets) }))
+            .filter(({ exercise, rows }) => exercise.name.trim() && rows.length);
+
+        if (!validExercises.length) return alert("Add at least one valid set before finishing.");
+
+        setSaving(true);
+        const unsaved = validExercises.filter(({ exercise }) => !exercise.savedExerciseId);
+        if (unsaved.length) {
+            if (!currentWorkoutId) {
+                const saved = await confirmSaveWorkout(workoutTitle);
+                if (!saved) {
+                    setSaving(false);
+                    return;
+                }
+            } else {
+                for (const { exercise } of unsaved) {
+                    const saved = await saveQueuedExercise(exercise, { silent: true });
+                    if (!saved) {
+                        setSaving(false);
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (currentWorkoutId) {
+            const { error } = await supabase.from("workouts").update({ duration_seconds: workoutElapsedSeconds, name: workoutTitle }).eq("id", currentWorkoutId).eq("user_key", userKey);
+            if (error) {
+                setSaving(false);
+                return alert(error.message);
+            }
+        }
+        setSaving(false);
+
+        setFinishSummary({
+            title: workoutTitle,
+            duration: workoutDurationLabel,
+            volume: workoutStatsVolume,
+            sets: workoutStatsSetCount,
+            exercises: validExercises.length,
+        });
+        setWorkoutQueue([]);
+        setCollapsedQueueIds([]);
+        setFullscreenExerciseId("");
+        setCurrentWorkoutId("");
+        setWorkoutName("");
+        setSavedWorkoutName("");
+        setDraftWorkoutActive(false);
+        localStorage.removeItem(WORKOUT_UI_STATE_KEY);
+        clearTracker();
+        await loadData();
+    }
+
     useEffect(() => {
         return () => {
             Object.values(autosaveTimersRef.current).forEach((timer) => clearTimeout(timer));
@@ -2095,6 +2182,7 @@ export default function Home() {
                                 </label>
                                 <div className="expanded-view-actions">
                                     <button className="bare-icon-btn" aria-label="Clear all" type="button" onClick={() => setClearDraftModalOpen(true)}><Eraser size={18} /></button>
+                                    <button className="btn finish-workout-compact-btn" type="button" disabled={saving || !workoutStatsSetCount} onClick={finishWorkout}>Finish</button>
                                 </div>
                             </div>
                             <div className="expanded-workout-stats" aria-label="Workout summary">
@@ -2116,6 +2204,13 @@ export default function Home() {
                         </div>
                     </div>
                     <div className="workout-list">
+                        {workoutQueue.length === 0 && (
+                            <div className="expanded-workout-empty">
+                                <Dumbbell size={28} />
+                                <strong>No exercises yet</strong>
+                                <span>Use the floating plus button to start tracking sets.</span>
+                            </div>
+                        )}
                         {workoutQueue.map((exercise) => {
                             const rows = validSetRows(exercise.sets);
                             const volume = rows.reduce((sum, set) => sum + set.reps * set.weight, 0);
@@ -3002,7 +3097,14 @@ export default function Home() {
                                 const selected = selectedPickerExercises.some((item) => normalise(item.name) === normalise(exercise.name));
                                 const alreadyAdded = workoutQueue.some((item) => normalise(item.name) === normalise(exercise.name));
                                 return (
-                                    <button className={selected ? "exercise-picker-item selected" : "exercise-picker-item"} type="button" key={`${exercise.source}-${exercise.id}`} disabled={alreadyAdded} onClick={() => togglePickerExercise(exercise)}>
+                                    <button
+                                        className={selected ? "exercise-picker-item selected" : "exercise-picker-item"}
+                                        type="button"
+                                        key={`${exercise.source}-${exercise.id}`}
+                                        disabled={alreadyAdded}
+                                        onPointerDown={(event) => event.preventDefault()}
+                                        onClick={() => togglePickerExercise(exercise)}
+                                    >
                                         <span className="exercise-suggestion-icon">{exercise.image_url ? <img src={exercise.image_url} alt="" /> : <Dumbbell size={17} />}</span>
                                         <span className="exercise-suggestion-copy"><span>{exercise.name}</span><small>{alreadyAdded ? "Already added" : [exercise.category, exercise.muscles?.[0], exercise.equipment?.[0]].filter(Boolean).join(" • ")}</small></span>
                                         {selected && <Check size={17} />}
@@ -3095,6 +3197,25 @@ export default function Home() {
                         <div className="dialog-actions">
                             <Dialog.Close asChild><button className="btn secondary">Cancel</button></Dialog.Close>
                             <button className="btn danger" onClick={confirmDeleteWorkout}>Delete</button>
+                        </div>
+                    </Dialog.Content>
+                </Dialog.Portal>
+            </Dialog.Root>
+
+            <Dialog.Root open={Boolean(finishSummary)} onOpenChange={(open) => !open && setFinishSummary(null)}>
+                <Dialog.Portal>
+                    <Dialog.Overlay className="dialog-overlay" />
+                    <Dialog.Content className="dialog-content finish-summary-dialog">
+                        <Dialog.Title className="dialog-title">Workout complete</Dialog.Title>
+                        <Dialog.Description className="dialog-description">{finishSummary?.title}</Dialog.Description>
+                        <div className="finish-summary-grid">
+                            <span><small>Duration</small><strong>{finishSummary?.duration}</strong></span>
+                            <span><small>Volume</small><strong>{finishSummary?.volume} lbs</strong></span>
+                            <span><small>Sets</small><strong>{finishSummary?.sets}</strong></span>
+                            <span><small>Exercises</small><strong>{finishSummary?.exercises}</strong></span>
+                        </div>
+                        <div className="dialog-actions">
+                            <Dialog.Close asChild><button className="btn">Done</button></Dialog.Close>
                         </div>
                     </Dialog.Content>
                 </Dialog.Portal>
