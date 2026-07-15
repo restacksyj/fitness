@@ -34,6 +34,28 @@ create index if not exists workouts_user_created_idx on public.workouts(user_key
 create index if not exists workout_exercises_user_created_idx on public.workout_exercises(user_key, created_at desc);
 create index if not exists workout_exercises_user_name_idx on public.workout_exercises(user_key, lower(exercise_name));
 
+create table if not exists public.routines (
+  id uuid primary key default gen_random_uuid(),
+  user_key text not null,
+  title text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.routine_exercises (
+  id uuid primary key default gen_random_uuid(),
+  routine_id uuid not null references public.routines(id) on delete cascade,
+  user_key text not null,
+  exercise_name text not null,
+  position int not null default 0,
+  set_rows jsonb not null default '[]'::jsonb,
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists routines_user_created_idx on public.routines(user_key, created_at desc);
+create index if not exists routine_exercises_routine_position_idx on public.routine_exercises(routine_id, position);
+
 create table if not exists public.exercise_catalog (
   id uuid primary key default gen_random_uuid(),
   wger_id int not null unique,
@@ -85,6 +107,8 @@ create index if not exists body_weights_user_date_idx on public.body_weights(use
 
 alter table public.workouts enable row level security;
 alter table public.workout_exercises enable row level security;
+alter table public.routines enable row level security;
+alter table public.routine_exercises enable row level security;
 alter table public.exercise_catalog enable row level security;
 alter table public.custom_exercises enable row level security;
 alter table public.body_weights enable row level security;
@@ -107,6 +131,14 @@ drop policy if exists "authenticated can insert own workout exercises" on public
 drop policy if exists "authenticated can read own workout exercises" on public.workout_exercises;
 drop policy if exists "authenticated can update own workout exercises" on public.workout_exercises;
 drop policy if exists "authenticated can delete own workout exercises" on public.workout_exercises;
+drop policy if exists "authenticated can insert own routines" on public.routines;
+drop policy if exists "authenticated can read own routines" on public.routines;
+drop policy if exists "authenticated can update own routines" on public.routines;
+drop policy if exists "authenticated can delete own routines" on public.routines;
+drop policy if exists "authenticated can insert own routine exercises" on public.routine_exercises;
+drop policy if exists "authenticated can read own routine exercises" on public.routine_exercises;
+drop policy if exists "authenticated can update own routine exercises" on public.routine_exercises;
+drop policy if exists "authenticated can delete own routine exercises" on public.routine_exercises;
 drop policy if exists "anon can read exercise catalog" on public.exercise_catalog;
 drop policy if exists "authenticated can read exercise catalog" on public.exercise_catalog;
 drop policy if exists "authenticated can insert own custom exercises" on public.custom_exercises;
@@ -130,6 +162,14 @@ create policy "authenticated can insert own workout exercises" on public.workout
 create policy "authenticated can read own workout exercises" on public.workout_exercises for select to authenticated using ((select auth.uid())::text = user_key);
 create policy "authenticated can update own workout exercises" on public.workout_exercises for update to authenticated using ((select auth.uid())::text = user_key) with check ((select auth.uid())::text = user_key);
 create policy "authenticated can delete own workout exercises" on public.workout_exercises for delete to authenticated using ((select auth.uid())::text = user_key);
+create policy "authenticated can insert own routines" on public.routines for insert to authenticated with check ((select auth.uid())::text = user_key);
+create policy "authenticated can read own routines" on public.routines for select to authenticated using ((select auth.uid())::text = user_key);
+create policy "authenticated can update own routines" on public.routines for update to authenticated using ((select auth.uid())::text = user_key) with check ((select auth.uid())::text = user_key);
+create policy "authenticated can delete own routines" on public.routines for delete to authenticated using ((select auth.uid())::text = user_key);
+create policy "authenticated can insert own routine exercises" on public.routine_exercises for insert to authenticated with check ((select auth.uid())::text = user_key);
+create policy "authenticated can read own routine exercises" on public.routine_exercises for select to authenticated using ((select auth.uid())::text = user_key);
+create policy "authenticated can update own routine exercises" on public.routine_exercises for update to authenticated using ((select auth.uid())::text = user_key) with check ((select auth.uid())::text = user_key);
+create policy "authenticated can delete own routine exercises" on public.routine_exercises for delete to authenticated using ((select auth.uid())::text = user_key);
 create policy "anon can read exercise catalog" on public.exercise_catalog for select to anon using (true);
 create policy "authenticated can read exercise catalog" on public.exercise_catalog for select to authenticated using (true);
 create policy "authenticated can insert own custom exercises" on public.custom_exercises for insert to authenticated with check ((select auth.uid())::text = user_key);

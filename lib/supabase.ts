@@ -41,6 +41,25 @@ export type WorkoutExercise = {
   created_at: string;
 };
 
+export type Routine = {
+  id: string;
+  user_key: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RoutineExercise = {
+  id: string;
+  routine_id: string;
+  user_key: string;
+  exercise_name: string;
+  position: number;
+  set_rows: WorkoutSetRow[];
+  notes: string | null;
+  created_at: string;
+};
+
 export type ExerciseCatalogItem = {
   id: string;
   wger_id: number;
