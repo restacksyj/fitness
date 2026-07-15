@@ -5,10 +5,10 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
 import { format } from "date-fns";
 import { AnimatePresence, motion } from "framer-motion";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent, type TouchEvent } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Maximize2, Minimize2, Minus, Moon, Plus, RefreshCw, Save, Search, Send, Sun, TrendingUp, Trash2, Weight, X } from "lucide-react";
+import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Maximize2, Minimize2, Minus, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type CustomExercise, type ExerciseCatalogItem, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
@@ -37,7 +37,7 @@ type AgentContext = {
 };
 type AgentAnswer = { answer: string; breakdown?: Array<{ label: string; value: number; unit: string }>; tables?: AgentTable[]; context?: AgentContext };
 type AgentChatMessage = { id: string; role: "user" | "assistant"; content: string; breakdown?: AgentAnswer["breakdown"]; tables?: AgentTable[] };
-type EditableWorkoutExercise = { id: string; name: string; setRows: WorkoutSetRow[]; image_url?: string | null; isNew?: boolean };
+type EditableWorkoutExercise = { id: string; name: string; notes: string; setRows: WorkoutSetRow[]; image_url?: string | null; isNew?: boolean };
 type OfflineWorkoutPayload = { name: string; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
 type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on: string; notes: string | null };
 
@@ -52,7 +52,9 @@ const WEIGHT_PAGE_SIZE = 10;
 const todayInputValue = () => new Date().toISOString().slice(0, 10);
 const SECTION_STORAGE_KEY = "progressfit-active-section";
 const TOAST_DURATION_MS = 1500;
-type ActiveSection = "workouts" | "exercises" | "progress" | "weight";
+const SWIPE_DELETE_WIDTH = 88;
+const PULL_REFRESH_THRESHOLD = 82;
+type ActiveSection = "workouts" | "exercises" | "progress" | "weight" | "settings";
 type WorkoutUiState = { active: boolean; expanded: boolean; startedAt: number };
 const MUSCLE_GROUPS = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core"] as const;
 const CUSTOM_EXERCISE_CATEGORIES = ["Arms", "Back", "Chest", "Core", "Legs", "Shoulders", "Cardio", "Full Body", "Other"] as const;
@@ -234,6 +236,7 @@ export default function Home() {
     const [workoutEndDate, setWorkoutEndDate] = useState("");
     const [workoutPage, setWorkoutPage] = useState(0);
     const [editingWorkoutId, setEditingWorkoutId] = useState("");
+    const [editingWorkoutFullscreen, setEditingWorkoutFullscreen] = useState(false);
     const [editWorkoutName, setEditWorkoutName] = useState("");
     const [editWorkoutExercises, setEditWorkoutExercises] = useState<EditableWorkoutExercise[]>([]);
     const [weightValue, setWeightValue] = useState("");
@@ -262,10 +265,14 @@ export default function Home() {
     const [collapsedQueueIds, setCollapsedQueueIds] = useState<string[]>([]);
     const [fullscreenExerciseId, setFullscreenExerciseId] = useState("");
     const [exercisePickerOpen, setExercisePickerOpen] = useState(false);
+    const [exercisePickerMode, setExercisePickerMode] = useState<"track" | "edit">("track");
     const [exercisePickerSearch, setExercisePickerSearch] = useState("");
     const [exercisePickerSuggestions, setExercisePickerSuggestions] = useState<ExerciseSuggestion[]>([]);
     const [selectedPickerExercises, setSelectedPickerExercises] = useState<ExerciseSuggestion[]>([]);
     const [openSwipeSet, setOpenSwipeSet] = useState<{ exerciseId: string; setId: string; offset: number } | null>(null);
+    const [activeSwipeSetId, setActiveSwipeSetId] = useState("");
+    const [pullRefreshDistance, setPullRefreshDistance] = useState(0);
+    const [isPullRefreshing, setIsPullRefreshing] = useState(false);
     const [draggingSetId, setDraggingSetId] = useState("");
     const [dragOverSetId, setDragOverSetId] = useState("");
     const [draftReady, setDraftReady] = useState(false);
@@ -279,13 +286,16 @@ export default function Home() {
     const offlineSyncInFlightRef = useRef(false);
     const autosaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const autosaveSignaturesRef = useRef<Record<string, string>>({});
+    const swipeGestureRef = useRef<{ exerciseId: string; setId: string; startX: number; startY: number; startOffset: number; currentOffset: number; isSwiping: boolean } | null>(null);
+    const pullRefreshRef = useRef<{ startY: number; active: boolean } | null>(null);
+    const exercisePickerInputRef = useRef<HTMLInputElement | null>(null);
     const weightFormRef = useRef<HTMLDivElement | null>(null);
     const weightInputRef = useRef<HTMLInputElement | null>(null);
     const skipInitialSectionPersistRef = useRef(true);
 
     useEffect(() => {
         const saved = localStorage.getItem(SECTION_STORAGE_KEY);
-        if (saved === "workouts" || saved === "exercises" || saved === "progress" || saved === "weight") setActiveSection(saved);
+        if (saved === "workouts" || saved === "exercises" || saved === "progress" || saved === "weight" || saved === "settings") setActiveSection(saved);
     }, []);
 
     useEffect(() => {
@@ -936,6 +946,64 @@ export default function Home() {
         await Promise.all([loadHistory(key), loadRecentWorkouts(key), loadBodyWeights(key), loadBodyWeightHistory(key)]);
     }
 
+    async function refreshWorkoutData() {
+        if (isPullRefreshing) return;
+        setIsPullRefreshing(true);
+        try {
+            await refreshOfflineCount();
+            await loadData();
+        } finally {
+            setPullRefreshDistance(0);
+            setIsPullRefreshing(false);
+            pullRefreshRef.current = null;
+        }
+    }
+
+    function canStartPullRefresh() {
+        return activeSection === "workouts" && !editingWorkoutFullscreen && !isPullRefreshing && window.scrollY <= 2;
+    }
+
+    function startPullRefresh(event: TouchEvent<HTMLElement>) {
+        if (!canStartPullRefresh() || event.touches.length !== 1) return;
+        pullRefreshRef.current = { startY: event.touches[0].clientY, active: true };
+    }
+
+    function movePullRefresh(event: TouchEvent<HTMLElement>) {
+        const gesture = pullRefreshRef.current;
+        if (!gesture?.active || event.touches.length !== 1) return;
+        const distance = event.touches[0].clientY - gesture.startY;
+        if (distance <= 0) {
+            setPullRefreshDistance(0);
+            return;
+        }
+        if (window.scrollY > 2) {
+            pullRefreshRef.current = null;
+            setPullRefreshDistance(0);
+            return;
+        }
+        setPullRefreshDistance(Math.min(112, distance * 0.55));
+    }
+
+    function endPullRefresh() {
+        const shouldRefresh = pullRefreshDistance >= PULL_REFRESH_THRESHOLD;
+        pullRefreshRef.current = null;
+        if (shouldRefresh) {
+            void refreshWorkoutData();
+            return;
+        }
+        setPullRefreshDistance(0);
+    }
+
+    function blurActiveInput() {
+        if (document.activeElement !== exercisePickerInputRef.current) return;
+        document.documentElement.style.setProperty("--app-viewport-height", `${window.innerHeight}px`);
+        exercisePickerInputRef.current?.blur();
+        window.requestAnimationFrame(() => {
+            document.documentElement.style.setProperty("--app-viewport-height", `${window.innerHeight}px`);
+            exercisePickerInputRef.current?.blur();
+        });
+    }
+
     async function loadHistory(key = userKey) {
         if (!key || !isSupabaseConfigured) return;
         const { data, error } = await supabase
@@ -1350,10 +1418,16 @@ export default function Home() {
     }
 
     function togglePickerExercise(exercise: ExerciseSuggestion) {
-        setSelectedPickerExercises((current) => current.some((item) => normalise(item.name) === normalise(exercise.name)) ? current.filter((item) => normalise(item.name) !== normalise(exercise.name)) : [...current, exercise]);
+        setSelectedPickerExercises((current) => {
+            if (exercisePickerMode === "edit") return [exercise];
+            return current.some((item) => normalise(item.name) === normalise(exercise.name)) ? current.filter((item) => normalise(item.name) !== normalise(exercise.name)) : [...current, exercise];
+        });
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     }
 
-    function openExercisePicker() {
+    function openExercisePicker(mode: "track" | "edit" = "track", editExerciseId = "") {
+        setExercisePickerMode(mode);
+        if (editExerciseId) setActiveEditExerciseId(editExerciseId);
         setSelectedPickerExercises([]);
         setExercisePickerSearch("");
         setExercisePickerSuggestions([]);
@@ -1361,6 +1435,15 @@ export default function Home() {
     }
 
     function addSelectedPickerExercises() {
+        if (exercisePickerMode === "edit") {
+            const selected = selectedPickerExercises[0];
+            if (selected && activeEditExerciseId) updateEditWorkoutExercise(activeEditExerciseId, { name: selected.name, image_url: selected.image_url });
+            setExercisePickerOpen(false);
+            setExercisePickerMode("track");
+            setSelectedPickerExercises([]);
+            return;
+        }
+
         const additions = selectedPickerExercises.filter((exercise) => !workoutQueue.some((item) => normalise(item.name) === normalise(exercise.name)));
         if (!additions.length) {
             setExercisePickerOpen(false);
@@ -1512,12 +1595,14 @@ export default function Home() {
         return true;
     }
 
-    function startEditWorkout(workout: WorkoutWithExercises) {
+    function startEditWorkout(workout: WorkoutWithExercises, options: { fullscreen?: boolean } = {}) {
         setEditingWorkoutId(workout.id);
+        setEditingWorkoutFullscreen(Boolean(options.fullscreen));
         setEditWorkoutName(workout.name || formatWorkoutName(new Date(workout.created_at)));
         setEditWorkoutExercises((workout.workout_exercises ?? []).map((exercise) => ({
             id: exercise.id,
             name: exercise.exercise_name,
+            notes: exercise.notes ?? "",
             image_url: workoutExerciseMeta.get(normalise(exercise.exercise_name))?.image_url ?? null,
             setRows: (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }]).map((set, index) => ({
                 set: index + 1,
@@ -1530,6 +1615,7 @@ export default function Home() {
 
     function cancelEditWorkout() {
         setEditingWorkoutId("");
+        setEditingWorkoutFullscreen(false);
         setEditWorkoutName("");
         setEditWorkoutExercises([]);
     }
@@ -1561,13 +1647,56 @@ export default function Home() {
         } : exercise));
     }
 
+    function adjustEditWorkoutSet(exerciseId: string, setIndex: number, field: "reps" | "weight", delta: number) {
+        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? {
+            ...exercise,
+            setRows: exercise.setRows.map((set, index) => {
+                if (index !== setIndex) return set;
+                const nextValue = Math.max(0, Number(set[field] || 0) + delta);
+                return { ...set, [field]: nextValue };
+            }),
+        } : exercise));
+    }
+
+    function startSavedSetSwipe(event: PointerEvent<HTMLElement>, exerciseId: string, setId: string) {
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        const startOffset = openSwipeSet?.exerciseId === exerciseId && openSwipeSet.setId === setId ? openSwipeSet.offset : 0;
+        swipeGestureRef.current = { exerciseId, setId, startX: event.clientX, startY: event.clientY, startOffset, currentOffset: startOffset, isSwiping: false };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+    }
+
+    function moveSavedSetSwipe(event: PointerEvent<HTMLElement>) {
+        const gesture = swipeGestureRef.current;
+        if (!gesture) return;
+        const deltaX = event.clientX - gesture.startX;
+        const deltaY = event.clientY - gesture.startY;
+        if (!gesture.isSwiping) {
+            if (Math.abs(deltaX) < 8 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+            gesture.isSwiping = true;
+            setActiveSwipeSetId(gesture.setId);
+        }
+        event.preventDefault();
+        const offset = Math.min(0, Math.max(-SWIPE_DELETE_WIDTH, gesture.startOffset + deltaX));
+        gesture.currentOffset = offset;
+        setOpenSwipeSet({ exerciseId: gesture.exerciseId, setId: gesture.setId, offset });
+    }
+
+    function endSavedSetSwipe() {
+        const gesture = swipeGestureRef.current;
+        if (!gesture) return;
+        const offset = gesture.currentOffset;
+        setOpenSwipeSet(offset < -36 ? { exerciseId: gesture.exerciseId, setId: gesture.setId, offset: -SWIPE_DELETE_WIDTH } : null);
+        swipeGestureRef.current = null;
+        setActiveSwipeSetId("");
+    }
+
     function removeEditWorkoutExercise(exerciseId: string) {
         setEditWorkoutExercises((prev) => prev.filter((exercise) => exercise.id !== exerciseId));
     }
 
     function addEditWorkoutExercise() {
         const id = `new-${crypto.randomUUID()}`;
-        setEditWorkoutExercises((prev) => [...prev, { id, name: "", setRows: [{ set: 1, reps: 0, weight: 0, notes: "" }], isNew: true }]);
+        setEditWorkoutExercises((prev) => [...prev, { id, name: "", notes: "", setRows: [{ set: 1, reps: 0, weight: 0, notes: "" }], isNew: true }]);
         setExpandedWorkoutExerciseIds((prev) => [...prev, id]);
         setActiveEditExerciseId(id);
     }
@@ -1601,6 +1730,7 @@ export default function Home() {
                 weight: Math.max(...exercise.setRows.map((set) => set.weight)),
                 volume: exercise.setRows.reduce((sum, set) => sum + set.reps * set.weight, 0),
                 set_rows: exercise.setRows,
+                notes: exercise.notes.trim() || null,
             };
             const query = exercise.isNew
                 ? supabase.from("workout_exercises").insert({ ...payload, workout_id: workout.id, user_key: userKey })
@@ -2103,29 +2233,12 @@ export default function Home() {
 
     return (
         <main>
-            <header className="hero app-hero">
-                <div>
-                    <h1>ProgressFit</h1>
-                </div>
-                <div className="hero-actions">
-                    <button className="bare-icon-btn hero-auth-btn theme-toggle" aria-label={`Theme: ${theme}. Switch theme`} title={`Theme: ${theme}`} onClick={cycleTheme}>
-                        {theme === "dark" ? <Moon size={20} /> : <Sun size={20} />}
-                    </button>
-                    <button className="bare-icon-btn hero-auth-btn" aria-label="Ask ProgressFit" title="Ask ProgressFit" onClick={() => setAgentModalOpen(true)}><Bot size={20} /></button>
-                    <button className="bare-icon-btn hero-auth-btn" aria-label="Refresh" onClick={() => window.location.reload()}><RefreshCw size={20} /></button>
-                    {authLoading ? null : authUserEmail ? (
-                        <button className="bare-icon-btn hero-auth-btn" aria-label="Sign out" title={authUserEmail} onClick={() => setLogoutConfirmOpen(true)}><LogOut size={20} /></button>
-                    ) : (
-                        <button className="bare-icon-btn hero-auth-btn" aria-label="Sign in" onClick={() => setAuthModalOpen(true)}><LogIn size={20} /></button>
-                    )}
-                </div>
-            </header>
-
-            <nav className="top-nav" aria-label="Main sections" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6 }}>
+            <nav className="top-nav" aria-label="Main sections" style={{ gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 6 }}>
                 <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "workouts" ? "active" : ""} onClick={() => setActiveSection("workouts")}>Workouts</button>
                 <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "exercises" ? "active" : ""} onClick={() => setActiveSection("exercises")}>Track</button>
                 <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "progress" ? "active" : ""} onClick={() => setActiveSection("progress")}>Progress</button>
                 <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "weight" ? "active" : ""} onClick={() => setActiveSection("weight")}>Weight</button>
+                <button style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "12px 6px", whiteSpace: "nowrap" }} className={activeSection === "settings" ? "active" : ""} onClick={() => setActiveSection("settings")}>Settings</button>
             </nav>
 
             {(!isOnline || offlineQueueCount > 0) && (
@@ -2198,7 +2311,7 @@ export default function Home() {
                             <input value={workoutName} onChange={(event) => setWorkoutName(event.target.value)} placeholder={formatWorkoutName()} aria-label="Workout name" />
                         </label>
                         <div className="row action-row tracker-actions-row">
-                            <button className="bare-icon-btn" aria-label="Add exercises" onClick={openExercisePicker}><Plus size={18} /></button>
+                            <button className="bare-icon-btn" aria-label="Add exercises" onClick={() => openExercisePicker()}><Plus size={18} /></button>
                             <button className="bare-icon-btn" aria-label={fullscreenExerciseId ? "Exit expanded tracking view" : "Open expanded tracking view"} onClick={toggleTrackerFullscreen}>{fullscreenExerciseId ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</button>
                             <button className="bare-icon-btn" aria-label="Clear all" onClick={() => setClearDraftModalOpen(true)}><Eraser size={18} /></button>
                         </div>
@@ -2320,21 +2433,22 @@ export default function Home() {
                                                     const isSwipeOpen = swipeOffset < 0;
                                                     return (
                                                         <div className="swipe-set-row" style={isFullscreen ? undefined : { minWidth: 390 }} key={set.id}>
-                                                            {isSwipeOpen && <button className="swipe-delete-action" type="button" onClick={() => removeQueuedSet(exercise.id, set.id)}>Delete</button>}
+                                                            <button className="swipe-delete-action" type="button" tabIndex={isSwipeOpen ? 0 : -1} onClick={() => { removeQueuedSet(exercise.id, set.id); setOpenSwipeSet(null); }}>Delete</button>
                                                             <motion.div
                                                                 className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
                                                                 style={isFullscreen ? { gridTemplateColumns: "20px 24px minmax(76px,1fr) minmax(76px,1fr) minmax(42px,.55fr)", gap: 4 } : { gridTemplateColumns: "24px 32px minmax(124px,1.2fr) minmax(124px,1.2fr) minmax(58px,.65fr)", gap: 6, minWidth: 390 }}
                                                                 drag="x"
-                                                                dragConstraints={{ left: -82, right: 0 }}
-                                                                dragElastic={0.08}
+                                                                dragConstraints={{ left: -SWIPE_DELETE_WIDTH, right: 0 }}
+                                                                dragElastic={0.12}
+                                                                dragDirectionLock
                                                                 dragMomentum={false}
                                                                 animate={{ x: swipeOffset }}
-                                                                transition={{ type: "spring", stiffness: 500, damping: 42 }}
+                                                                transition={{ type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}
                                                                 onDragStart={() => {
                                                                     if (openSwipeSet && (openSwipeSet.exerciseId !== exercise.id || openSwipeSet.setId !== set.id)) setOpenSwipeSet(null);
                                                                 }}
                                                                 onDragEnd={(_, info) => {
-                                                                    setOpenSwipeSet(info.offset.x < -42 ? { exerciseId: exercise.id, setId: set.id, offset: -82 } : null);
+                                                                    setOpenSwipeSet(info.offset.x < -36 || info.velocity.x < -420 ? { exerciseId: exercise.id, setId: set.id, offset: -SWIPE_DELETE_WIDTH } : null);
                                                                 }}
                                                                 onDragOver={(event) => {
                                                                     event.preventDefault();
@@ -2416,7 +2530,7 @@ export default function Home() {
                             className="expanded-add-exercise-fab"
                             type="button"
                             aria-label="Add exercise"
-                            onClick={openExercisePicker}
+                            onClick={() => openExercisePicker()}
                             initial={{ opacity: 0, scale: 0.72, y: 18 }}
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.72, y: 18 }}
@@ -2430,12 +2544,150 @@ export default function Home() {
                 )}
             </AnimatePresence>
 
-            {activeSection === "workouts" && (
-                <section className="card stack recent-card">
-                    <div className="section-title">
-                        <h2><Activity size={18} /> Workouts</h2>
-                    </div>
+            <AnimatePresence>
+                {activeSection === "workouts" && editingWorkoutFullscreen && editingWorkoutId && (() => {
+                    const workout = recentWorkouts.find((row) => row.id === editingWorkoutId);
+                    if (!workout) return null;
+                    const editWorkoutVolume = editWorkoutExercises.reduce((sum, exercise) => sum + exercise.setRows.reduce((setSum, set) => setSum + Number(set.reps || 0) * Number(set.weight || 0), 0), 0);
+                    const editWorkoutSetCount = editWorkoutExercises.reduce((sum, exercise) => sum + exercise.setRows.filter((set) => Number(set.reps) > 0 && Number(set.weight) >= 0).length, 0);
+                    return (
+                        <motion.section
+                            className="card stack recent-card expanded-workout-section saved-workout-editor-section"
+                            initial={{ opacity: 0, y: 32, scale: 0.985 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 32, scale: 0.985 }}
+                            transition={{ type: "spring", stiffness: 360, damping: 36 }}
+                        >
+                            <div className="expanded-view-top">
+                                <div className="expanded-workout-title-row">
+                                    <button className="bare-icon-btn" aria-label="Cancel editing workout" onClick={cancelEditWorkout}><ChevronRight size={18} /></button>
+                                    <label className="expanded-workout-name">
+                                        <input value={editWorkoutName} onChange={(event) => setEditWorkoutName(event.target.value)} placeholder={formatWorkoutName(new Date(workout.created_at))} aria-label="Workout name" />
+                                    </label>
+                                    <div className="expanded-view-actions">
+                                        <button className="btn finish-workout-compact-btn" type="button" disabled={saving || !editWorkoutSetCount} onClick={() => saveEditWorkout(workout)}>Save</button>
+                                    </div>
+                                </div>
+                                <div className="expanded-workout-stats" aria-label="Workout summary">
+                                    <span><small>Duration</small><strong>{formatDurationSeconds(workout.duration_seconds)}</strong></span>
+                                    <span><small>Volume</small><strong>{editWorkoutVolume}</strong></span>
+                                    <span><small>Sets</small><strong>{editWorkoutSetCount}</strong></span>
+                                </div>
+                            </div>
+                            <div className="workout-list">
+                                {editWorkoutExercises.length === 0 && (
+                                    <div className="expanded-workout-empty">
+                                        <Dumbbell size={28} />
+                                        <strong>No exercises saved</strong>
+                                        <span>Use the floating plus button to add an exercise.</span>
+                                    </div>
+                                )}
+                                {editWorkoutExercises.map((exercise) => {
+                                    const isCollapsed = !expandedWorkoutExerciseIds.includes(exercise.id);
+                                    const rows = exercise.setRows.filter((set) => Number(set.reps) > 0 && Number(set.weight) >= 0);
+                                    const volume = rows.reduce((sum, set) => sum + Number(set.reps) * Number(set.weight), 0);
+                                    const exerciseMeta = workoutExerciseMeta.get(normalise(exercise.name));
+                                    const exerciseImageUrl = exercise.image_url ?? exerciseMeta?.image_url;
+                                    return (
+                                        <div className="workout-exercise-section expanded-workout-exercise" key={exercise.id}>
+                                            <div className="workout-exercise-header saved-edit-exercise-header">
+                                                <button
+                                                    className="workout-exercise-toggle"
+                                                    aria-expanded={!isCollapsed}
+                                                    onClick={() => setExpandedWorkoutExerciseIds((prev) => prev.includes(exercise.id) ? prev.filter((id) => id !== exercise.id) : [...prev, exercise.id])}
+                                                >
+                                                    <ChevronDown className={isCollapsed ? "chevron" : "chevron open"} size={18} />
+                                                    <span className="exercise-suggestion-icon">
+                                                        {exerciseImageUrl ? <img src={exerciseImageUrl} alt="" /> : <Dumbbell size={17} />}
+                                                    </span>
+                                                </button>
+                                                <button className="saved-edit-exercise-name" type="button" onClick={() => openExercisePicker("edit", exercise.id)}>
+                                                    <span>{exercise.name || "Select exercise"}</span>
+                                                    <small>Tap to change</small>
+                                                </button>
+                                                <button className="bare-icon-btn expanded-exercise-delete" type="button" aria-label={`Delete ${exercise.name || "exercise"}`} onClick={() => removeEditWorkoutExercise(exercise.id)}><Trash2 size={16} /></button>
+                                            </div>
+                                            {!isCollapsed && (
+                                                <div className="workout-exercise-body">
+                                                    <div className="record-detail-meta saved-edit-exercise-meta">
+                                                        <span>{rows.length} {rows.length === 1 ? "set" : "sets"}</span>
+                                                        <span>{volume} lbs volume</span>
+                                                        {exercise.name.trim() && <Link href={`/history?exercise=${encodeURIComponent(exercise.name.trim())}`}>View records</Link>}
+                                                    </div>
+                                                    <textarea className="input exercise-notes-input saved-edit-exercise-notes" rows={1} aria-label={`${exercise.name || "Exercise"} notes`} placeholder="Add exercise notes here..." value={exercise.notes} onChange={(event) => updateEditWorkoutExercise(exercise.id, { notes: event.target.value })} />
+                                                    <div className="queued-set-table saved-edit-set-table">
+                                                        <div className="set-grid queued-set-grid table-head saved-edit-set-grid" aria-hidden="true">
+                                                            <span>Set</span>
+                                                            <span>Weight</span>
+                                                            <span>Reps</span>
+                                                        </div>
+                                                        {exercise.setRows.map((set, index) => {
+                                                            const editSetSwipeId = `edit-${exercise.id}-${index}`;
+                                                            const swipeOffset = openSwipeSet?.exerciseId === exercise.id && openSwipeSet.setId === editSetSwipeId ? openSwipeSet.offset : 0;
+                                                            const isSwipeOpen = swipeOffset < 0;
+                                                            return (
+                                                                <div className="swipe-set-row saved-edit-swipe-row" key={`${exercise.id}-${set.set}-${index}`}>
+                                                                    <button className="swipe-delete-action" type="button" tabIndex={isSwipeOpen ? 0 : -1} onClick={() => { removeEditWorkoutSet(exercise.id, index); setOpenSwipeSet(null); }}>Delete</button>
+                                                                    <motion.div
+                                                                        className="saved-edit-set-block saved-edit-set-content"
+                                                                        animate={{ x: swipeOffset }}
+                                                                        transition={activeSwipeSetId === editSetSwipeId ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}
+                                                                        onPointerDown={(event) => startSavedSetSwipe(event, exercise.id, editSetSwipeId)}
+                                                                        onPointerMove={moveSavedSetSwipe}
+                                                                        onPointerUp={endSavedSetSwipe}
+                                                                        onPointerCancel={endSavedSetSwipe}
+                                                                    >
+                                                                        <div className="set-grid queued-set-grid saved-edit-set-grid">
+                                                                            <span className="set-number">{index + 1}</span>
+                                                                            <div className="weight-control">
+                                                                                <input className="input weight-input" inputMode="decimal" aria-label={`${exercise.name || "Exercise"} set ${index + 1} weight in lbs`} placeholder="0" value={set.weight} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
+                                                                                <button className="weight-step-btn weight-step-btn-left" type="button" aria-label="Decrease weight by 5 lbs" onClick={() => adjustEditWorkoutSet(exercise.id, index, "weight", -5)}><Minus size={14} /></button>
+                                                                                <button className="weight-step-btn weight-step-btn-right" type="button" aria-label="Increase weight by 5 lbs" onClick={() => adjustEditWorkoutSet(exercise.id, index, "weight", 5)}><Plus size={14} /></button>
+                                                                            </div>
+                                                                            <div className="reps-control">
+                                                                                <input className="input reps-input" inputMode="numeric" aria-label={`${exercise.name || "Exercise"} set ${index + 1} reps`} placeholder="0" value={set.reps} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
+                                                                                <button className="reps-step-btn reps-step-btn-left" type="button" aria-label="Decrease reps" onClick={() => adjustEditWorkoutSet(exercise.id, index, "reps", -1)}><Minus size={14} /></button>
+                                                                                <button className="reps-step-btn reps-step-btn-right" type="button" aria-label="Increase reps" onClick={() => adjustEditWorkoutSet(exercise.id, index, "reps", 1)}><Plus size={14} /></button>
+                                                                            </div>
+                                                                        </div>
+                                                                    </motion.div>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                    <div className="fullscreen-tracker-actions">
+                                                        <button className="btn" type="button" onClick={() => addEditWorkoutSet(exercise.id)}><Plus size={16} /> Add set</button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <motion.button
+                                className="expanded-add-exercise-fab"
+                                type="button"
+                                aria-label="Add exercise"
+                                onClick={addEditWorkoutExercise}
+                                initial={{ opacity: 0, scale: 0.72, y: 18 }}
+                                animate={{ opacity: 1, scale: 1, y: 0 }}
+                                exit={{ opacity: 0, scale: 0.72, y: 18 }}
+                                whileTap={{ scale: 0.92 }}
+                                transition={{ type: "spring", stiffness: 520, damping: 32 }}
+                            >
+                                <Plus size={22} />
+                            </motion.button>
+                        </motion.section>
+                    );
+                })()}
+            </AnimatePresence>
 
+            {activeSection === "workouts" && (
+                <section className="stack workouts-section" onTouchStart={startPullRefresh} onTouchMove={movePullRefresh} onTouchEnd={endPullRefresh} onTouchCancel={endPullRefresh}>
+                    <div className={pullRefreshDistance > 0 || isPullRefreshing ? "pull-refresh-indicator visible" : "pull-refresh-indicator"} style={{ height: pullRefreshDistance || (isPullRefreshing ? 42 : 0) }}>
+                        <RefreshCw className={isPullRefreshing ? "spinning" : ""} size={16} />
+                        <span>{isPullRefreshing ? "Refreshing..." : pullRefreshDistance >= PULL_REFRESH_THRESHOLD ? "Release to refresh" : "Pull to refresh"}</span>
+                    </div>
                     <div className="workout-filters">
                         <div className="input-icon-wrap workout-search-field">
                             <Search className="input-icon" size={17} />
@@ -2462,7 +2714,93 @@ export default function Home() {
 
                     {workoutRows.length ? (
                         <>
-                            <div className="table-wrap">
+                            <div className="workout-card-list">
+                                {workoutRows.map((workout) => {
+                                    const isExpanded = expandedWorkoutIds.includes(workout.id);
+                                    const exercises = workout.workout_exercises ?? [];
+                                    const volume = exercises.reduce((sum, exercise) => sum + Number(exercise.volume || 0), 0);
+                                    const workoutNameValue = workout.name || formatWorkoutName(new Date(workout.created_at));
+                                    return (
+                                        <article className="workout-card-item" key={workout.id}>
+                                            <div className="workout-card-top">
+                                                <button className="workout-card-main" type="button" onClick={() => setExpandedWorkoutIds((current) => isExpanded ? current.filter((id) => id !== workout.id) : [...current, workout.id])}>
+                                                    <span className="workout-card-chevron"><ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={18} /></span>
+                                                    <span className="workout-card-copy">
+                                                        <strong>{workoutNameValue}</strong>
+                                                        <small>{new Date(workout.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</small>
+                                                    </span>
+                                                </button>
+                                                <div className="workout-card-icon-actions">
+                                                    <button
+                                                        className="bare-icon-btn workout-card-edit-btn"
+                                                        type="button"
+                                                        aria-label={`Edit ${workoutNameValue}`}
+                                                        onClick={() => startEditWorkout(workout, { fullscreen: true })}
+                                                    >
+                                                        <Edit3 size={16} />
+                                                    </button>
+                                                    <button
+                                                        className="bare-icon-btn workout-card-delete-btn"
+                                                        type="button"
+                                                        aria-label={`Delete ${workoutNameValue}`}
+                                                        onClick={() => setPendingDeleteWorkout(workout)}
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="workout-card-stats">
+                                                <span><small>Duration</small><strong>{formatDurationSeconds(workout.duration_seconds)}</strong></span>
+                                                <span><small>Volume</small><strong>{volume} lbs</strong></span>
+                                                <span><small>Exercises</small><strong>{exercises.length}</strong></span>
+                                            </div>
+                                            {isExpanded && (
+                                                <div className="workout-card-detail">
+                                                    {exercises.length ? exercises.map((exercise) => {
+                                                        const isExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id);
+                                                        const setRows = exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }];
+                                                        const bestRow = setRows.reduce<WorkoutSetRow | null>((best, set) => !best || Number(set.weight) > Number(best.weight) ? set : best, null);
+                                                        return (
+                                                            <div className="workout-card-exercise" key={exercise.id}>
+                                                                <div className="workout-card-exercise-head">
+                                                                    <button className="workout-card-exercise-toggle" type="button" aria-expanded={isExerciseExpanded} onClick={() => setExpandedWorkoutExerciseIds((current) => current.includes(exercise.id) ? current.filter((id) => id !== exercise.id) : [...current, exercise.id])}>
+                                                                        <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={16} />
+                                                                        <span>
+                                                                            <strong>{exercise.exercise_name}</strong>
+                                                                            <small>{setRows.length} {setRows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</small>
+                                                                        </span>
+                                                                    </button>
+                                                                    <Link href={`/history?exercise=${encodeURIComponent(exercise.exercise_name.trim())}`}>Records</Link>
+                                                                </div>
+                                                                {isExerciseExpanded && (
+                                                                    <>
+                                                                        {exercise.notes && <p className="workout-card-exercise-notes">{exercise.notes}</p>}
+                                                                        <div className="workout-card-set-table" aria-label={`${exercise.exercise_name} sets`}>
+                                                                            <div className="workout-card-set-head" aria-hidden="true">
+                                                                                <span>Set</span>
+                                                                                <span>Reps</span>
+                                                                                <span>Weight</span>
+                                                                            </div>
+                                                                            {setRows.map((set, setIndex) => (
+                                                                                <div className="workout-card-set-row" key={`${exercise.id}-${set.set}-${setIndex}`}>
+                                                                                    <span>{setIndex + 1}</span>
+                                                                                    <span>{set.reps}</span>
+                                                                                    <span>{set.weight} lbs</span>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    }) : <p className="muted">No exercises saved.</p>}
+                                                </div>
+                                            )}
+                                        </article>
+                                    );
+                                })}
+                            </div>
+                            <div className="table-wrap workouts-table-wrap">
                                 <table className="records-table workouts-table">
                                     <colgroup>
                                         <col style={{ width: "var(--workout-toggle-col)" }} />
@@ -2681,10 +3019,7 @@ export default function Home() {
             )}
 
             {activeSection === "progress" && (
-                <section className="card stack recent-card">
-                    <div className="section-title">
-                        <h2><TrendingUp size={18} /> Progress</h2>
-                    </div>
+                <section className="stack progress-section">
                     <div className="input-icon-wrap search-combo">
                         <Search className="input-icon" size={17} />
                         <input
@@ -2871,10 +3206,7 @@ export default function Home() {
             )}
 
             {activeSection === "weight" && (
-                <section className="card stack recent-card">
-                    <div className="section-title">
-                        <h2><Weight size={18} /> Weight</h2>
-                    </div>
+                <section className="stack weight-section">
                     <div ref={weightFormRef} className="stack">
                         {editingWeightId && <div className="sync-status" style={{ marginBottom: 0 }}><span>Editing weight entry</span><span>{weightDate}</span></div>}
                         <div className="date-filters">
@@ -2969,6 +3301,41 @@ export default function Home() {
                             )}
                         </>
                     ) : <div className="empty">No weight records found.</div>}
+                </section>
+            )}
+
+            {activeSection === "settings" && (
+                <section className="stack settings-section">
+                    <div className="settings-list">
+                        <button className="settings-row" type="button" onClick={cycleTheme}>
+                            <span className="settings-row-icon">{theme === "dark" ? <Moon size={18} /> : <Sun size={18} />}</span>
+                            <span><strong>Mode</strong><small>{theme === "dark" ? "Dark" : "Light"}</small></span>
+                            <ChevronRight size={17} />
+                        </button>
+                        <button className="settings-row" type="button" onClick={() => setAgentModalOpen(true)}>
+                            <span className="settings-row-icon"><Bot size={18} /></span>
+                            <span><strong>Ask ProgressFit</strong><small>Chat with your training history</small></span>
+                            <ChevronRight size={17} />
+                        </button>
+                        <button className="settings-row" type="button" onClick={() => window.location.reload()}>
+                            <span className="settings-row-icon"><RefreshCw size={18} /></span>
+                            <span><strong>Refresh app</strong><small>Reload latest data</small></span>
+                            <ChevronRight size={17} />
+                        </button>
+                        {authLoading ? null : authUserEmail ? (
+                            <button className="settings-row" type="button" onClick={() => setLogoutConfirmOpen(true)}>
+                                <span className="settings-row-icon"><LogOut size={18} /></span>
+                                <span><strong>Sign out</strong><small>{authUserEmail}</small></span>
+                                <ChevronRight size={17} />
+                            </button>
+                        ) : (
+                            <button className="settings-row" type="button" onClick={() => setAuthModalOpen(true)}>
+                                <span className="settings-row-icon"><LogIn size={18} /></span>
+                                <span><strong>Sign in</strong><small>Sync workouts across devices</small></span>
+                                <ChevronRight size={17} />
+                            </button>
+                        )}
+                    </div>
                 </section>
             )}
 
@@ -3073,36 +3440,41 @@ export default function Home() {
                             </Dialog.Overlay>
                             <Dialog.Content forceMount asChild>
                                 <motion.div
-                                    className="dialog-content exercise-picker-dialog"
+                                    className={selectedPickerExercises.length ? "dialog-content exercise-picker-dialog has-selection" : "dialog-content exercise-picker-dialog"}
                                     initial={isMobileView ? { opacity: 0, y: 24 } : { opacity: 0, x: "-50%", y: "-46%", scale: 0.96 }}
                                     animate={isMobileView ? { opacity: 1, y: 0 } : { opacity: 1, x: "-50%", y: "-50%", scale: 1 }}
                                     exit={isMobileView ? { opacity: 0, y: 24 } : { opacity: 0, x: "-50%", y: "-46%", scale: 0.96 }}
                                     transition={{ type: "spring", stiffness: 420, damping: 34 }}
                                 >
                         <div className="exercise-picker-header">
-                            <Dialog.Title className="dialog-title">Add exercises</Dialog.Title>
+                            <Dialog.Title className="dialog-title">{exercisePickerMode === "edit" ? "Select exercise" : "Add exercises"}</Dialog.Title>
                             <Dialog.Close asChild><button className="bare-icon-btn" aria-label="Close add exercises"><X size={18} /></button></Dialog.Close>
                         </div>
                         <div className="input-icon-wrap search-combo">
                             <Search className="input-icon" size={17} />
-                            <input className="input with-icon" value={exercisePickerSearch} onChange={(event) => setExercisePickerSearch(event.target.value)} placeholder="Search exercises" autoFocus />
+                            <input ref={exercisePickerInputRef} className="input with-icon with-clear" value={exercisePickerSearch} onChange={(event) => setExercisePickerSearch(event.target.value)} placeholder="Search exercises" autoFocus />
+                            {exercisePickerSearch && (
+                                <button className="clear-input" aria-label="Clear exercise search" onClick={() => setExercisePickerSearch("")}>
+                                    <X size={16} />
+                                </button>
+                            )}
                         </div>
                         {selectedPickerExercises.length > 0 && (
                             <div className="exercise-picker-selected">
                                 {selectedPickerExercises.map((exercise) => <button type="button" key={exercise.id} onClick={() => togglePickerExercise(exercise)}>{exercise.name}<X size={13} /></button>)}
                             </div>
                         )}
-                        <div className="exercise-picker-list">
-                            {exercisePickerSearch.trim().length < 2 ? <p className="muted">Search and select multiple exercises.</p> : exercisePickerSuggestions.length ? exercisePickerSuggestions.map((exercise) => {
+                        <div className="exercise-picker-list" onTouchStartCapture={blurActiveInput} onPointerDownCapture={blurActiveInput} onTouchMoveCapture={blurActiveInput} onWheel={blurActiveInput} onScroll={blurActiveInput}>
+                            {exercisePickerSearch.trim().length < 2 ? <p className="muted">Start typing to find an exercise.</p> : exercisePickerSuggestions.length ? exercisePickerSuggestions.map((exercise) => {
                                 const selected = selectedPickerExercises.some((item) => normalise(item.name) === normalise(exercise.name));
-                                const alreadyAdded = workoutQueue.some((item) => normalise(item.name) === normalise(exercise.name));
+                                const alreadyAdded = exercisePickerMode === "track" && workoutQueue.some((item) => normalise(item.name) === normalise(exercise.name));
                                 return (
                                     <button
                                         className={selected ? "exercise-picker-item selected" : "exercise-picker-item"}
                                         type="button"
                                         key={`${exercise.source}-${exercise.id}`}
                                         disabled={alreadyAdded}
-                                        onPointerDown={(event) => event.preventDefault()}
+                                        onPointerDown={blurActiveInput}
                                         onClick={() => togglePickerExercise(exercise)}
                                     >
                                         <span className="exercise-suggestion-icon">{exercise.image_url ? <img src={exercise.image_url} alt="" /> : <Dumbbell size={17} />}</span>
@@ -3114,7 +3486,7 @@ export default function Home() {
                         </div>
                         <div className="dialog-actions exercise-picker-actions">
                             <button className="btn secondary" type="button" onClick={() => setExercisePickerOpen(false)}>Cancel</button>
-                            <button className="btn" type="button" disabled={!selectedPickerExercises.length} onClick={addSelectedPickerExercises}>Add {selectedPickerExercises.length || ""}</button>
+                            <button className="btn" type="button" disabled={!selectedPickerExercises.length} onClick={addSelectedPickerExercises}>{exercisePickerMode === "edit" ? "Select exercise" : `Add ${selectedPickerExercises.length || ""} ${selectedPickerExercises.length === 1 ? "exercise" : "exercises"}`}</button>
                         </div>
                                 </motion.div>
                             </Dialog.Content>
