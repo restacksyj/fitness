@@ -8,7 +8,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent, type TouchEvent } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Eraser, GripVertical, LogIn, LogOut, Maximize2, Minimize2, Minus, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
+import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Dumbbell, Edit3, Eraser, LogIn, LogOut, Maximize2, Minimize2, Minus, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type CustomExercise, type ExerciseCatalogItem, type Routine, type RoutineExercise, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
@@ -58,6 +58,7 @@ const SECTION_STORAGE_KEY = "progressfit-active-section";
 const TOAST_DURATION_MS = 1500;
 const SWIPE_DELETE_WIDTH = 88;
 const PULL_REFRESH_THRESHOLD = 82;
+const REST_TIMER_OPTIONS = [0, 10, 20, 30, 45, 60, 90, 120, 180] as const;
 type ActiveSection = "workouts" | "exercises" | "progress" | "weight" | "settings";
 type WorkoutUiState = { active: boolean; expanded: boolean; startedAt: number };
 const MUSCLE_GROUPS = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core"] as const;
@@ -76,6 +77,8 @@ const formatDurationSeconds = (seconds?: number | null) => {
     if (wholeSeconds >= 60) return `${Math.floor(wholeSeconds / 60)}m ${wholeSeconds % 60}s`;
     return `${wholeSeconds}s`;
 };
+const formatRestTimer = (seconds: number) => `${Math.floor(Math.max(0, seconds) / 60).toString().padStart(2, "0")}:${Math.max(0, seconds % 60).toString().padStart(2, "0")}`;
+const formatRestOption = (seconds: number) => seconds === 0 ? "Off" : seconds < 60 ? `${seconds}s` : seconds % 60 === 0 ? `${seconds / 60}m` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 
 function muscleGroupFor(muscle: string): MuscleGroup | null {
     const value = muscle.toLowerCase();
@@ -96,7 +99,7 @@ function loadTrackerDraft(): ExerciseTrackerDraft | null {
         const parsed = JSON.parse(raw) as ExerciseTrackerDraft;
         return {
             exerciseName: typeof parsed.exerciseName === "string" ? parsed.exerciseName : "",
-            sets: Array.isArray(parsed.sets) && parsed.sets.length ? parsed.sets : blankTrackerSets(),
+            sets: Array.isArray(parsed.sets) && parsed.sets.length ? parsed.sets.map((set) => ({ ...set, completed: Boolean(set.completed), prefilled: Boolean(set.prefilled) })) : blankTrackerSets(),
         };
     } catch {
         return null;
@@ -307,6 +310,11 @@ export default function Home() {
     const [expandedRecentRecordId, setExpandedRecentRecordId] = useState("");
     const [collapsedQueueIds, setCollapsedQueueIds] = useState<string[]>([]);
     const [fullscreenExerciseId, setFullscreenExerciseId] = useState("");
+    const [restTimerRemaining, setRestTimerRemaining] = useState(0);
+    const [restTimerTotal, setRestTimerTotal] = useState(0);
+    const [restTimerSheetOpen, setRestTimerSheetOpen] = useState(false);
+    const [restTimerExerciseId, setRestTimerExerciseId] = useState("");
+    const [restTimerMinimized, setRestTimerMinimized] = useState(false);
     const [exercisePickerOpen, setExercisePickerOpen] = useState(false);
     const [exercisePickerMode, setExercisePickerMode] = useState<"track" | "edit" | "routine" | "routine-edit">("track");
     const [exercisePickerSearch, setExercisePickerSearch] = useState("");
@@ -316,8 +324,6 @@ export default function Home() {
     const [activeSwipeSetId, setActiveSwipeSetId] = useState("");
     const [pullRefreshDistance, setPullRefreshDistance] = useState(0);
     const [isPullRefreshing, setIsPullRefreshing] = useState(false);
-    const [draggingSetId, setDraggingSetId] = useState("");
-    const [dragOverSetId, setDragOverSetId] = useState("");
     const [draftReady, setDraftReady] = useState(false);
     const [saving, setSaving] = useState(false);
     const [toast, setToast] = useState("");
@@ -328,15 +334,33 @@ export default function Home() {
     const offlineSyncInFlightRef = useRef(false);
     const swipeGestureRef = useRef<{ exerciseId: string; setId: string; startX: number; startY: number; startOffset: number; currentOffset: number; isSwiping: boolean } | null>(null);
     const pullRefreshRef = useRef<{ startY: number; active: boolean } | null>(null);
+    const restAudioContextRef = useRef<AudioContext | null>(null);
     const exercisePickerInputRef = useRef<HTMLInputElement | null>(null);
     const weightFormRef = useRef<HTMLDivElement | null>(null);
     const weightInputRef = useRef<HTMLInputElement | null>(null);
     const skipInitialSectionPersistRef = useRef(true);
+    const restTimerCompletedRef = useRef(false);
 
     useEffect(() => {
         const saved = localStorage.getItem(SECTION_STORAGE_KEY);
         if (saved === "workouts" || saved === "exercises" || saved === "progress" || saved === "weight" || saved === "settings") setActiveSection(saved);
     }, []);
+
+    useEffect(() => {
+        if (!restTimerRemaining) return;
+        const timer = window.setInterval(() => setRestTimerRemaining((remaining) => Math.max(0, remaining - 1)), 1000);
+        return () => window.clearInterval(timer);
+    }, [restTimerRemaining]);
+
+    useEffect(() => {
+        if (restTimerRemaining > 0) {
+            restTimerCompletedRef.current = false;
+            return;
+        }
+        if (!restTimerTotal || restTimerCompletedRef.current) return;
+        restTimerCompletedRef.current = true;
+        playRestTimerSound();
+    }, [restTimerRemaining, restTimerTotal]);
 
     useEffect(() => {
         if (skipInitialSectionPersistRef.current) {
@@ -1387,9 +1411,79 @@ export default function Home() {
     function lastBestForSet(exerciseName: string, setNumber: number) {
         const record = exerciseHistoryRows.find((item) => normalise(item.exercise_name) === normalise(exerciseName));
         const row = record?.set_rows?.find((set) => Number(set.set) === setNumber);
-        if (row) return `${row.weight}×${row.reps}`;
-        if (record && setNumber === 1) return `${record.weight}×${record.reps}`;
+        if (row) return `${row.weight} lbs x ${row.reps}`;
+        if (record && setNumber === 1) return `${record.weight} lbs x ${record.reps}`;
         return "—";
+    }
+
+    function restAudioContext() {
+        const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!AudioContextClass) return null;
+        restAudioContextRef.current ??= new AudioContextClass();
+        restAudioContextRef.current.resume().catch(() => undefined);
+        return restAudioContextRef.current;
+    }
+
+    function playRestTimerSound() {
+        const context = restAudioContext();
+        if (!context) return;
+        context.resume().then(() => {
+            const oscillator = context.createOscillator();
+            const gain = context.createGain();
+            const now = context.currentTime;
+            oscillator.type = "sine";
+            oscillator.frequency.setValueAtTime(880, now);
+            oscillator.frequency.setValueAtTime(1174, now + 0.12);
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+            oscillator.connect(gain);
+            gain.connect(context.destination);
+            oscillator.start(now);
+            oscillator.stop(now + 0.38);
+        }).catch(() => undefined);
+    }
+
+    function startRestTimer(seconds: number) {
+        if (!seconds) return;
+        restAudioContext();
+        restTimerCompletedRef.current = false;
+        setRestTimerMinimized(false);
+        setRestTimerTotal(seconds);
+        setRestTimerRemaining(seconds);
+    }
+
+    function decreaseRestTimer() {
+        setRestTimerRemaining((remaining) => Math.max(0, remaining - 15));
+    }
+
+    function increaseRestTimer() {
+        setRestTimerRemaining((remaining) => {
+            const next = Math.max(1, remaining + 15);
+            setRestTimerTotal((total) => Math.max(total, next));
+            return next;
+        });
+    }
+
+    function skipRestTimer() {
+        restTimerCompletedRef.current = true;
+        setRestTimerRemaining(0);
+        setRestTimerTotal(0);
+    }
+
+    function previousBestSetValues(exerciseName: string, setNumber: number) {
+        const record = exerciseHistoryRows.find((item) => normalise(item.exercise_name) === normalise(exerciseName));
+        const row = record?.set_rows?.find((set) => Number(set.set) === setNumber);
+        if (row) return { reps: String(row.reps || ""), weight: String(row.weight || "") };
+        const fallbackRow = record?.set_rows?.at(-1);
+        if (fallbackRow) return { reps: String(fallbackRow.reps || ""), weight: String(fallbackRow.weight || "") };
+        if (record && setNumber === 1) return { reps: String(record.reps || ""), weight: String(record.weight || "") };
+        return null;
+    }
+
+    function trackerSetFromPreviousBest(exerciseName: string, setNumber: number): SetRow {
+        const bestValues = previousBestSetValues(exerciseName, setNumber);
+        return bestValues ? { id: crypto.randomUUID(), ...bestValues, notes: "", completed: false, prefilled: true } : blankSet();
     }
 
     function bestPerformedSet(record: WorkoutExercise) {
@@ -1405,6 +1499,7 @@ export default function Home() {
 
     function validSetRows(sourceSets = sets) {
         return sourceSets
+            .filter((set) => set.completed)
             .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: set.weight === "" ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
             .filter((set) => Number.isFinite(set.reps) && set.reps > 0 && Number.isFinite(set.weight) && set.weight >= 0);
     }
@@ -1475,19 +1570,6 @@ export default function Home() {
         setSets((prev) => prev.map((set) => (set.id === setId ? { ...set, ...patch } : set)));
     }
 
-    function reorderSets(fromId: string, toId: string) {
-        if (!fromId || !toId || fromId === toId) return;
-        setSets((prev) => {
-            const fromIndex = prev.findIndex((set) => set.id === fromId);
-            const toIndex = prev.findIndex((set) => set.id === toId);
-            if (fromIndex < 0 || toIndex < 0) return prev;
-            const next = [...prev];
-            const [moved] = next.splice(fromIndex, 1);
-            next.splice(toIndex, 0, moved);
-            return next;
-        });
-    }
-
     function addToWorkout(nameOverride?: string, metaOverride?: ExerciseSuggestion | null) {
         const name = (nameOverride ?? exerciseName).trim();
         if (!name) return alert("Search or enter an exercise name first.");
@@ -1514,12 +1596,13 @@ export default function Home() {
             {
                 id,
                 name,
-                sets: blankTrackerSets(),
+                sets: [trackerSetFromPreviousBest(name, 1)],
                 image_url: knownExercise.image_url ?? null,
                 category: knownExercise.category ?? null,
                 muscles: knownExercise.muscles ?? [],
                 equipment: knownExercise.equipment ?? [],
                 notes: "",
+                restTimerSeconds: 0,
             },
         ]);
         setCollapsedQueueIds((prev) => [...prev, id]);
@@ -1592,12 +1675,13 @@ export default function Home() {
         const drafts = additions.map((exercise) => ({
             id: crypto.randomUUID(),
             name: exercise.name,
-            sets: blankTrackerSets(),
+            sets: [trackerSetFromPreviousBest(exercise.name, 1)],
             image_url: exercise.image_url ?? null,
             category: exercise.category ?? null,
             muscles: exercise.muscles ?? [],
             equipment: exercise.equipment ?? [],
             notes: "",
+            restTimerSeconds: 0,
         }));
         setDraftWorkoutActive(true);
         setWorkoutQueue((prev) => [...prev, ...drafts]);
@@ -1612,7 +1696,7 @@ export default function Home() {
         const name = exerciseName.trim();
         const rows = validSetRows();
         if (!isSupabaseConfigured) return alert("Add Supabase env vars in .env.local first.");
-        if (!name || !rows.length || !userKey) return alert("Add an exercise name and at least one valid set first.");
+        if (!name || !rows.length || !userKey) return alert("Add an exercise name and complete at least one valid set first.");
 
         const saved = await saveExercises([{ name, sets: rows }], name);
         if (saved) clearTracker();
@@ -1629,7 +1713,7 @@ export default function Home() {
         if (!isSupabaseConfigured) return alert("Add Supabase env vars in .env.local first.");
         if (!rows.length) {
             if (hasWorkoutNameChanged) return saveWorkoutNameChange();
-            return alert("Add at least one exercise with a valid set before saving a workout.");
+            return alert("Complete at least one valid set before saving a workout.");
         }
         if (!userKey) return alert("Sign in before saving a workout.");
 
@@ -1668,7 +1752,7 @@ export default function Home() {
         const title = titleOverride?.trim() || workoutNameInput.trim() || workoutTitle;
 
         if (!rows.length) {
-            alert("Add at least one unsaved exercise with a valid set before saving a workout.");
+            alert("Complete at least one unsaved valid set before saving a workout.");
             return false;
         }
 
@@ -2045,12 +2129,13 @@ export default function Home() {
             return {
                 id: crypto.randomUUID(),
                 name: exercise.exercise_name,
-                sets: (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: 0, weight: 0 }]).map((set) => ({ id: crypto.randomUUID(), reps: String(set.reps || ""), weight: String(set.weight || ""), notes: set.notes ?? "" })),
+                sets: (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: 0, weight: 0 }]).map((set) => ({ id: crypto.randomUUID(), reps: String(set.reps || ""), weight: String(set.weight || ""), notes: set.notes ?? "", completed: false, prefilled: true })),
                 image_url: meta?.image_url ?? null,
                 category: null,
                 muscles: [],
                 equipment: [],
                 notes: exercise.notes ?? "",
+                restTimerSeconds: 0,
             };
         });
         setWorkoutStartedAt(now);
@@ -2274,11 +2359,15 @@ export default function Home() {
         );
     }
 
+    function toggleQueuedSetCompleted(exerciseId: string, setId: string, completed: boolean, restSeconds: number) {
+        updateQueuedSet(exerciseId, setId, { completed });
+        if (completed) startRestTimer(restSeconds);
+    }
+
     function addQueuedSet(exerciseId: string) {
         setWorkoutQueue((prev) => prev.map((exercise) => {
             if (exercise.id !== exerciseId) return exercise;
-            const previous = exercise.sets.at(-1);
-            const nextSet = previous ? { ...previous, id: crypto.randomUUID(), notes: "" } : blankSet();
+            const nextSet = trackerSetFromPreviousBest(exercise.name, exercise.sets.length + 1);
             return { ...exercise, sets: [...exercise.sets, nextSet] };
         }));
     }
@@ -2291,7 +2380,7 @@ export default function Home() {
                 sets: exercise.sets.map((set) => {
                     if (set.id !== setId) return set;
                     const current = Number(set.reps) || 0;
-                    return { ...set, reps: String(Math.max(0, current + delta)) };
+                    return { ...set, reps: String(Math.max(0, current + delta)), prefilled: false };
                 }),
             };
         }));
@@ -2305,26 +2394,10 @@ export default function Home() {
                 sets: exercise.sets.map((set) => {
                     if (set.id !== setId) return set;
                     const current = Number(set.weight) || 0;
-                    return { ...set, weight: String(Math.max(0, current + delta)) };
+                    return { ...set, weight: String(Math.max(0, current + delta)), prefilled: false };
                 }),
             };
         }));
-    }
-
-    function reorderQueuedSets(exerciseId: string, fromId: string, toId: string) {
-        if (!fromId || !toId || fromId === toId) return;
-        setWorkoutQueue((prev) =>
-            prev.map((exercise) => {
-                if (exercise.id !== exerciseId) return exercise;
-                const fromIndex = exercise.sets.findIndex((set) => set.id === fromId);
-                const toIndex = exercise.sets.findIndex((set) => set.id === toId);
-                if (fromIndex < 0 || toIndex < 0) return exercise;
-                const nextSets = [...exercise.sets];
-                const [moved] = nextSets.splice(fromIndex, 1);
-                nextSets.splice(toIndex, 0, moved);
-                return { ...exercise, sets: nextSets };
-            }),
-        );
     }
 
     function removeQueuedSet(exerciseId: string, setId: string) {
@@ -2369,7 +2442,7 @@ export default function Home() {
             .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets) }))
             .filter(({ name, sets }) => name && sets.length);
 
-        if (!validExercises.length) return alert("Add at least one valid set before finishing.");
+        if (!validExercises.length) return alert("Complete at least one valid set before finishing.");
 
         setSaving(true);
         const saved = await saveFinishedWorkout(workoutTitle, validExercises);
@@ -2407,8 +2480,10 @@ export default function Home() {
     const workoutStatsRows = workoutQueue.flatMap((exercise) => validSetRows(exercise.sets));
     const workoutStatsSetCount = workoutStatsRows.length;
     const workoutStatsVolume = workoutStatsRows.reduce((sum, set) => sum + set.reps * set.weight, 0);
+    const canFinishWorkout = workoutStatsSetCount > 0;
     const workoutElapsedSeconds = Math.max(0, Math.floor((workoutClockTick - workoutStartedAt) / 1000));
     const workoutDurationLabel = formatDurationSeconds(workoutElapsedSeconds);
+    const restTimerProgress = restTimerTotal ? Math.max(0, Math.min(1, restTimerRemaining / restTimerTotal)) : 0;
 
     return (
         <main>
@@ -2565,8 +2640,8 @@ export default function Home() {
                                                 })}
                                             </div>
                                         )}
-                                        <div className="queued-set-table saved-edit-set-table">
-                                            <div className="set-grid queued-set-grid table-head saved-edit-set-grid" aria-hidden="true">
+                                        <div className="queued-set-table saved-edit-set-table routine-set-table">
+                                            <div className="set-grid queued-set-grid table-head saved-edit-set-grid routine-set-grid" aria-hidden="true">
                                                 <span>Set</span><span>Weight</span><span>Reps</span>
                                             </div>
                                             {exercise.setRows.map((set, index) => {
@@ -2577,7 +2652,7 @@ export default function Home() {
                                                     <div className={isSwipeOpen ? "swipe-set-row saved-edit-swipe-row swipe-open" : "swipe-set-row saved-edit-swipe-row"} key={`${exercise.id}-${index}`}>
                                                         <button className="swipe-delete-action" type="button" tabIndex={isSwipeOpen ? 0 : -1} onClick={() => { removeRoutineSet(exercise.id, index); setOpenSwipeSet(null); }}>Delete</button>
                                                         <motion.div
-                                                            className="set-grid queued-set-grid saved-edit-set-grid routine-set-row"
+                                                            className="set-grid queued-set-grid saved-edit-set-grid routine-set-grid routine-set-row"
                                                             animate={{ x: swipeOffset }}
                                                             transition={activeSwipeSetId === routineSetSwipeId ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}
                                                             onPointerDown={(event) => startSavedSetSwipe(event, exercise.id, routineSetSwipeId)}
@@ -2653,7 +2728,7 @@ export default function Home() {
                                 </label>
                                 <div className="expanded-view-actions">
                                     <button className="bare-icon-btn" aria-label="Clear all" type="button" onClick={() => setClearDraftModalOpen(true)}><Eraser size={18} /></button>
-                                    <button className="btn finish-workout-compact-btn" type="button" disabled={saving || !workoutStatsSetCount} onClick={finishWorkout}>Finish</button>
+                                    <button className={canFinishWorkout ? "btn finish-workout-compact-btn can-finish" : "btn finish-workout-compact-btn"} type="button" disabled={saving || !canFinishWorkout} onClick={finishWorkout}>Finish</button>
                                 </div>
                             </div>
                             <div className="expanded-workout-stats" aria-label="Workout summary">
@@ -2727,6 +2802,10 @@ export default function Home() {
                                     {!isCollapsed && (
                                         <div className="workout-exercise-body">
                                             <textarea className="input exercise-notes-input" rows={1} aria-label={`${exercise.name} notes`} placeholder="Add notes here..." value={exercise.notes ?? ""} onChange={(event) => updateQueuedExerciseNotes(exercise.id, event.target.value)} />
+                                            <button className="rest-timer-inline" type="button" onClick={() => { setRestTimerExerciseId(exercise.id); setRestTimerSheetOpen(true); }}>
+                                                <Clock3 size={18} />
+                                                <span>Rest Timer: {formatRestOption(exercise.restTimerSeconds ?? 0)}</span>
+                                            </button>
                                             {exerciseHistory.length > 0 && (
                                                 <div className="recent-record-list exercise-history-list">
                                                     <div className="recent-list-header">
@@ -2779,22 +2858,22 @@ export default function Home() {
                                                 </div>
                                             )}
                                             <div className="queued-set-table">
-                                                <div className="set-grid queued-set-grid table-head" style={isFullscreen ? { gridTemplateColumns: "20px 24px minmax(76px,1fr) minmax(76px,1fr) minmax(42px,.55fr)", gap: 4 } : { gridTemplateColumns: "24px 32px minmax(124px,1.2fr) minmax(124px,1.2fr) minmax(58px,.65fr)", gap: 6, minWidth: 390 }} aria-hidden="true">
-                                                    <span></span>
+                                                <div className="set-grid queued-set-grid table-head" style={isFullscreen ? { gridTemplateColumns: "28px minmax(76px,1.2fr) minmax(56px,.8fr) minmax(70px,1fr) 40px", gap: 0 } : { gridTemplateColumns: "32px minmax(92px,1.2fr) minmax(66px,.8fr) minmax(82px,1fr) 42px", gap: 0, minWidth: 332 }} aria-hidden="true">
                                                     <span>Set</span>
                                                     <span>Weight</span>
                                                     <span>Reps</span>
-                                                    <span>Last best</span>
+                                                    <span>Best</span>
+                                                    <span className="set-complete-label"><Check size={13} /></span>
                                                 </div>
                                                 {exercise.sets.map((set, index) => {
                                                     const swipeOffset = openSwipeSet?.exerciseId === exercise.id && openSwipeSet.setId === set.id ? openSwipeSet.offset : 0;
                                                     const isSwipeOpen = swipeOffset < 0;
                                                     return (
-                                                        <div className={isSwipeOpen ? "swipe-set-row swipe-open" : "swipe-set-row"} style={isFullscreen ? undefined : { minWidth: 390 }} key={set.id}>
+                                                        <div className={isSwipeOpen ? "swipe-set-row swipe-open" : "swipe-set-row"} style={isFullscreen ? undefined : { minWidth: 332 }} key={set.id}>
                                                             <button className="swipe-delete-action" type="button" tabIndex={isSwipeOpen ? 0 : -1} onClick={() => { removeQueuedSet(exercise.id, set.id); setOpenSwipeSet(null); }}>Delete</button>
                                                             <motion.div
-                                                                className={`set-grid queued-set-grid draggable-row ${dragOverSetId === set.id ? "drag-over" : ""}`}
-                                                                style={isFullscreen ? { gridTemplateColumns: "20px 24px minmax(76px,1fr) minmax(76px,1fr) minmax(42px,.55fr)", gap: 4 } : { gridTemplateColumns: "24px 32px minmax(124px,1.2fr) minmax(124px,1.2fr) minmax(58px,.65fr)", gap: 6, minWidth: 390 }}
+                                                                className={`set-grid queued-set-grid draggable-row tracker-set-row ${set.completed ? "completed" : "unchecked"}`}
+                                                                style={isFullscreen ? { gridTemplateColumns: "28px minmax(76px,1.2fr) minmax(56px,.8fr) minmax(70px,1fr) 40px", gap: 0 } : { gridTemplateColumns: "32px minmax(92px,1.2fr) minmax(66px,.8fr) minmax(82px,1fr) 42px", gap: 0, minWidth: 332 }}
                                                                 drag="x"
                                                                 dragConstraints={{ left: -SWIPE_DELETE_WIDTH, right: 0 }}
                                                                 dragElastic={0.12}
@@ -2808,62 +2887,42 @@ export default function Home() {
                                                                 onDragEnd={(_, info) => {
                                                                     setOpenSwipeSet(info.offset.x < -36 || info.velocity.x < -420 ? { exerciseId: exercise.id, setId: set.id, offset: -SWIPE_DELETE_WIDTH } : null);
                                                                 }}
-                                                                onDragOver={(event) => {
-                                                                    event.preventDefault();
-                                                                    setDragOverSetId(set.id);
-                                                                }}
-                                                                onDragLeave={() => setDragOverSetId("")}
-                                                                onDrop={(event) => {
-                                                                    event.preventDefault();
-                                                                    reorderQueuedSets(exercise.id, draggingSetId, set.id);
-                                                                    setDraggingSetId("");
-                                                                    setDragOverSetId("");
-                                                                }}
                                                             >
-                                                                <button
-                                                                    className="drag-handle"
-                                                                    style={{ width: 22, minWidth: 22, height: 30, border: 0, background: "transparent", touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}
-                                                                    draggable
-                                                                    aria-label={`Drag ${exercise.name} set ${index + 1} to reorder`}
-                                                                    onPointerDown={(event) => event.currentTarget.setPointerCapture?.(event.pointerId)}
-                                                                    onDragStart={(event) => {
-                                                                        setDraggingSetId(set.id);
-                                                                        event.dataTransfer.effectAllowed = "move";
-                                                                        event.dataTransfer.setData("text/plain", set.id);
-                                                                    }}
-                                                                    onDragEnd={() => {
-                                                                        setDraggingSetId("");
-                                                                        setDragOverSetId("");
-                                                                    }}
-                                                                >
-                                                                    <GripVertical size={14} />
-                                                                </button>
                                                                 <span className="set-number">{index + 1}</span>
                                                                 <div className="weight-control">
                                                                     <input
-                                                                        className="input weight-input"
+                                                                        className={set.prefilled && !set.completed ? "input weight-input prefilled-value" : "input weight-input"}
                                                                         inputMode="decimal"
                                                                         aria-label={`${exercise.name} set ${index + 1} weight in lbs`}
                                                                         placeholder="0"
                                                                         value={set.weight}
-                                                                        onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, "") })}
+                                                                        onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, ""), prefilled: false })}
                                                                     />
                                                                     <button className="weight-step-btn weight-step-btn-left" type="button" aria-label={`Decrease ${exercise.name} set ${index + 1} weight by 5 lbs`} onClick={() => adjustQueuedSetWeight(exercise.id, set.id, -5)}><Minus size={14} /></button>
                                                                     <button className="weight-step-btn weight-step-btn-right" type="button" aria-label={`Increase ${exercise.name} set ${index + 1} weight by 5 lbs`} onClick={() => adjustQueuedSetWeight(exercise.id, set.id, 5)}><Plus size={14} /></button>
                                                                 </div>
                                                                 <div className="reps-control">
                                                                     <input
-                                                                        className="input reps-input"
+                                                                        className={set.prefilled && !set.completed ? "input reps-input prefilled-value" : "input reps-input"}
                                                                         inputMode="numeric"
                                                                         aria-label={`${exercise.name} set ${index + 1} reps`}
                                                                         placeholder="0"
                                                                         value={set.reps}
-                                                                        onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, "") })}
+                                                                        onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, ""), prefilled: false })}
                                                                     />
                                                                     <button className="reps-step-btn reps-step-btn-left" type="button" aria-label={`Decrease ${exercise.name} set ${index + 1} reps`} onClick={() => adjustQueuedSetReps(exercise.id, set.id, -1)}><Minus size={14} /></button>
                                                                     <button className="reps-step-btn reps-step-btn-right" type="button" aria-label={`Increase ${exercise.name} set ${index + 1} reps`} onClick={() => adjustQueuedSetReps(exercise.id, set.id, 1)}><Plus size={14} /></button>
                                                                 </div>
                                                                 <span className="last-best">{lastBestForSet(exercise.name, index + 1)}</span>
+                                                                <button
+                                                                    className="set-complete-btn"
+                                                                    type="button"
+                                                                    aria-label={`${set.completed ? "Mark incomplete" : "Complete"} ${exercise.name} set ${index + 1}`}
+                                                                    aria-pressed={Boolean(set.completed)}
+                                                                    onClick={() => toggleQueuedSetCompleted(exercise.id, set.id, !set.completed, exercise.restTimerSeconds ?? 0)}
+                                                                >
+                                                                    {set.completed && <Check size={16} />}
+                                                                </button>
                                                             </motion.div>
                                                         </div>
                                                     );
@@ -2978,6 +3037,7 @@ export default function Home() {
                                                             <span>Set</span>
                                                             <span>Weight</span>
                                                             <span>Reps</span>
+                                                            <span>Best</span>
                                                         </div>
                                                         {exercise.setRows.map((set, index) => {
                                                             const editSetSwipeId = `edit-${exercise.id}-${index}`;
@@ -3007,6 +3067,7 @@ export default function Home() {
                                                                                 <button className="reps-step-btn reps-step-btn-left" type="button" aria-label="Decrease reps" onClick={() => adjustEditWorkoutSet(exercise.id, index, "reps", -1)}><Minus size={14} /></button>
                                                                                 <button className="reps-step-btn reps-step-btn-right" type="button" aria-label="Increase reps" onClick={() => adjustEditWorkoutSet(exercise.id, index, "reps", 1)}><Plus size={14} /></button>
                                                                             </div>
+                                                                            <span className="last-best saved-edit-best">{exercise.name.trim() ? lastBestForSet(exercise.name, index + 1) : "—"}</span>
                                                                         </div>
                                                                     </motion.div>
                                                                 </div>
@@ -3697,6 +3758,68 @@ export default function Home() {
                     </div>
                 </section>
             )}
+
+            <AnimatePresence>
+                {activeSection === "exercises" && fullscreenExerciseId && restTimerRemaining > 0 && (
+                    <motion.div
+                        key={restTimerMinimized ? "rest-timer-minimized" : "rest-timer-expanded"}
+                        className={restTimerMinimized ? "rest-timer-panel minimized" : "rest-timer-panel"}
+                        initial={{ y: "100%", opacity: 0 }}
+                        animate={{ y: 0, opacity: 1 }}
+                        exit={{ y: "100%", opacity: 0 }}
+                        transition={{ type: "spring", stiffness: 360, damping: 34 }}
+                        drag={restTimerMinimized ? false : "y"}
+                        dragConstraints={{ top: 0, bottom: 150 }}
+                        dragElastic={0.12}
+                        dragMomentum={false}
+                        dragSnapToOrigin
+                        onDragEnd={(_, info) => {
+                            if (info.offset.y > 56 || info.velocity.y > 420) setRestTimerMinimized(true);
+                            else if (info.offset.y < -18 || info.velocity.y < -320) setRestTimerMinimized(false);
+                        }}
+                    >
+                        {restTimerMinimized ? (
+                            <div className="rest-timer-mini-controls">
+                                <button type="button" onClick={decreaseRestTimer}>-15</button>
+                                <button className="rest-timer-mini-time" type="button" onClick={() => setRestTimerMinimized(false)}><Clock3 size={15} /> {formatRestTimer(restTimerRemaining)}</button>
+                                <button type="button" onClick={increaseRestTimer}>+15</button>
+                                <button className="rest-timer-mini-skip" type="button" onClick={skipRestTimer}>Skip</button>
+                            </div>
+                        ) : (
+                            <>
+                                <div className="rest-timer-progress"><span style={{ transform: `scaleX(${restTimerProgress})` }} /></div>
+                                <strong>{formatRestTimer(restTimerRemaining)}</strong>
+                                <div className="rest-timer-actions">
+                                    <button type="button" onClick={decreaseRestTimer}>-15</button>
+                                    <button type="button" onClick={increaseRestTimer}>+15</button>
+                                    <button className="rest-timer-skip" type="button" onClick={skipRestTimer}>Skip</button>
+                                </div>
+                            </>
+                        )}
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {restTimerSheetOpen && (
+                    <>
+                        <motion.button className="bottom-sheet-backdrop" type="button" aria-label="Close rest timer options" onClick={() => setRestTimerSheetOpen(false)} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} />
+                        <motion.div className="bottom-sheet rest-timer-sheet" initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }} transition={{ type: "spring", stiffness: 380, damping: 36 }}>
+                            <h3>Rest timer</h3>
+                            <div className="rest-timer-options">
+                                {REST_TIMER_OPTIONS.map((seconds) => {
+                                    const selectedExercise = workoutQueue.find((exercise) => exercise.id === restTimerExerciseId);
+                                    return (
+                                    <button className={(selectedExercise?.restTimerSeconds ?? 0) === seconds ? "active" : ""} type="button" key={seconds} onClick={() => { setWorkoutQueue((current) => current.map((exercise) => exercise.id === restTimerExerciseId ? { ...exercise, restTimerSeconds: seconds } : exercise)); if (!seconds) { setRestTimerRemaining(0); setRestTimerTotal(0); } setRestTimerSheetOpen(false); }}>
+                                        {formatRestOption(seconds)}
+                                    </button>
+                                    );
+                                })}
+                            </div>
+                        </motion.div>
+                    </>
+                )}
+            </AnimatePresence>
 
             <Dialog.Root open={Boolean(pendingStartRoutine)} onOpenChange={(open) => { if (!open) setPendingStartRoutine(null); }}>
                 <Dialog.Portal>
