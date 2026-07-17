@@ -3,6 +3,7 @@ create table if not exists public.workouts (
   user_key text not null,
   name text not null default '',
   notes text,
+  photo_urls jsonb not null default '[]'::jsonb,
   duration_seconds int not null default 0 check (duration_seconds >= 0),
   created_at timestamptz not null default now()
 );
@@ -22,6 +23,8 @@ create table if not exists public.workout_exercises (
 
 -- Safe migrations if you already ran an older schema.
 alter table public.workouts add column if not exists name text not null default '';
+alter table public.workouts add column if not exists notes text;
+alter table public.workouts add column if not exists photo_urls jsonb not null default '[]'::jsonb;
 alter table public.workouts add column if not exists duration_seconds int not null default 0 check (duration_seconds >= 0);
 alter table public.workout_exercises add column if not exists weight numeric not null default 0 check (weight >= 0);
 alter table public.workout_exercises add column if not exists set_rows jsonb;
@@ -180,3 +183,22 @@ create policy "authenticated can insert own body weights" on public.body_weights
 create policy "authenticated can read own body weights" on public.body_weights for select to authenticated using ((select auth.uid())::text = user_key);
 create policy "authenticated can update own body weights" on public.body_weights for update to authenticated using ((select auth.uid())::text = user_key) with check ((select auth.uid())::text = user_key);
 create policy "authenticated can delete own body weights" on public.body_weights for delete to authenticated using ((select auth.uid())::text = user_key);
+
+insert into storage.buckets (id, name, public)
+values ('workout-images', 'workout-images', true)
+on conflict (id) do update set public = true;
+
+drop policy if exists "authenticated can upload own workout images" on storage.objects;
+drop policy if exists "authenticated can read own workout images" on storage.objects;
+drop policy if exists "authenticated can update own workout images" on storage.objects;
+drop policy if exists "authenticated can delete own workout images" on storage.objects;
+
+create policy "authenticated can upload own workout images" on storage.objects for insert to authenticated
+with check (bucket_id = 'workout-images' and (storage.foldername(name))[1] = (select auth.uid())::text);
+create policy "authenticated can read own workout images" on storage.objects for select to authenticated
+using (bucket_id = 'workout-images' and (storage.foldername(name))[1] = (select auth.uid())::text);
+create policy "authenticated can update own workout images" on storage.objects for update to authenticated
+using (bucket_id = 'workout-images' and (storage.foldername(name))[1] = (select auth.uid())::text)
+with check (bucket_id = 'workout-images' and (storage.foldername(name))[1] = (select auth.uid())::text);
+create policy "authenticated can delete own workout images" on storage.objects for delete to authenticated
+using (bucket_id = 'workout-images' and (storage.foldername(name))[1] = (select auth.uid())::text);

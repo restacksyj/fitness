@@ -1,4 +1,4 @@
-const CACHE = "progressfit-v9";
+const CACHE = "progressfit-v10";
 const ASSETS = ["/", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -35,6 +35,17 @@ self.addEventListener("fetch", (event) => {
         return cached;
       }
       return network.catch(() => new Response("Offline", { status: 504, statusText: "Offline" }));
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      const existing = clients.find((client) => new URL(client.url).origin === self.location.origin);
+      if (existing) return existing.focus();
+      return self.clients.openWindow("/");
     }),
   );
 });

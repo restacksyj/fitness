@@ -8,7 +8,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent, type TouchEvent } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Dumbbell, Edit3, Eraser, LogIn, LogOut, Maximize2, Minimize2, Minus, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
+import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Dumbbell, Edit3, Eraser, LogIn, LogOut, Maximize2, Minimize2, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type CustomExercise, type ExerciseCatalogItem, type Routine, type RoutineExercise, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
@@ -20,7 +20,7 @@ type RoutineWithExercises = Routine & { routine_exercises: RoutineExercise[] };
 type EditableSetRow = Omit<WorkoutSetRow, "reps" | "weight"> & { reps: number | string; weight: number | string };
 type ExerciseTrackerDraft = { exerciseName: string; sets: SetRow[] };
 type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" | "custom" };
-type MuscleCatalogItem = Pick<ExerciseCatalogItem, "name" | "muscles" | "muscles_secondary" | "image_url">;
+type MuscleCatalogItem = Pick<ExerciseCatalogItem, "name" | "muscles" | "muscles_secondary" | "equipment" | "image_url">;
 type AgentTable = { title: string; columns: string[]; rows: string[][] };
 type WorkoutSummary = {
     title: string;
@@ -29,6 +29,7 @@ type WorkoutSummary = {
     sets: number;
     exercises: number;
 };
+type FinishWorkoutDetails = { title: string; notes: string; photos: File[] };
 type AgentContext = {
     exerciseNames?: string[];
     muscleGroup?: string;
@@ -39,9 +40,9 @@ type AgentContext = {
 };
 type AgentAnswer = { answer: string; breakdown?: Array<{ label: string; value: number; unit: string }>; tables?: AgentTable[]; context?: AgentContext };
 type AgentChatMessage = { id: string; role: "user" | "assistant"; content: string; breakdown?: AgentAnswer["breakdown"]; tables?: AgentTable[] };
-type EditableWorkoutExercise = { id: string; name: string; notes: string; setRows: EditableSetRow[]; image_url?: string | null; isNew?: boolean };
+type EditableWorkoutExercise = { id: string; name: string; notes: string; setRows: EditableSetRow[]; image_url?: string | null; equipment?: string[]; isNew?: boolean };
 type RoutineBuilderDraft = { open: boolean; editingRoutineId: string; title: string; exercises: EditableWorkoutExercise[]; expandedIds: string[] };
-type OfflineWorkoutPayload = { name: string; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
+type OfflineWorkoutPayload = { name: string; notes?: string | null; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
 type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on: string; notes: string | null };
 
 const TRACKER_DRAFT_KEY = "progressfit-exercise-tracker-draft";
@@ -68,6 +69,7 @@ const CUSTOM_EXERCISE_EQUIPMENT = ["Barbell", "Dumbbell", "Cable", "Machine", "S
 type MuscleGroup = typeof MUSCLE_GROUPS[number];
 const estimateOneRepMax = (weight: number, reps: number) => Math.round(weight * (1 + reps / 30));
 const poundsToKilograms = (weight: number) => Number((weight * 0.45359237).toFixed(1));
+const isBodyweightEquipment = (equipment?: string[] | null) => (equipment ?? []).some((item) => normalise(item).includes("bodyweight"));
 const offlineId = (type: "weight" | "exercise" | "workout", id: number) => `offline-${type}-${id}`;
 const offlineQueueIdFrom = (id: string) => Number(id.split("-").at(-1));
 const formatDurationSeconds = (seconds?: number | null) => {
@@ -270,7 +272,7 @@ export default function Home() {
     const [customExerciseCategory, setCustomExerciseCategory] = useState("");
     const [customExerciseMuscles, setCustomExerciseMuscles] = useState<string[]>([]);
     const [customExerciseEquipment, setCustomExerciseEquipment] = useState<string[]>([]);
-    const [customExerciseTarget, setCustomExerciseTarget] = useState<"tracker" | "progress" | "edit" | "none">("none");
+    const [customExerciseTarget, setCustomExerciseTarget] = useState<"tracker" | "progress" | "edit" | "routine" | "routine-edit" | "none">("none");
     const [activeEditExerciseId, setActiveEditExerciseId] = useState("");
     const [editExerciseSuggestions, setEditExerciseSuggestions] = useState<ExerciseSuggestion[]>([]);
     const [recentWorkouts, setRecentWorkouts] = useState<WorkoutWithExercises[]>([]);
@@ -284,6 +286,10 @@ export default function Home() {
     const [editingWorkoutId, setEditingWorkoutId] = useState("");
     const [editingWorkoutFullscreen, setEditingWorkoutFullscreen] = useState(false);
     const [editWorkoutName, setEditWorkoutName] = useState("");
+    const [editWorkoutNotes, setEditWorkoutNotes] = useState("");
+    const [editWorkoutPhotoUrls, setEditWorkoutPhotoUrls] = useState<string[]>([]);
+    const [editWorkoutPhotos, setEditWorkoutPhotos] = useState<File[]>([]);
+    const [previewImageUrl, setPreviewImageUrl] = useState("");
     const [editWorkoutExercises, setEditWorkoutExercises] = useState<EditableWorkoutExercise[]>([]);
     const [weightValue, setWeightValue] = useState("");
     const [weightDate, setWeightDate] = useState(todayInputValue());
@@ -300,6 +306,10 @@ export default function Home() {
     const [clearDraftModalOpen, setClearDraftModalOpen] = useState(false);
     const [workoutNameModalOpen, setWorkoutNameModalOpen] = useState(false);
     const [workoutNameInput, setWorkoutNameInput] = useState(formatWorkoutName());
+    const [finishDetailsModalOpen, setFinishDetailsModalOpen] = useState(false);
+    const [finishWorkoutNameInput, setFinishWorkoutNameInput] = useState(formatWorkoutName());
+    const [finishWorkoutNotes, setFinishWorkoutNotes] = useState("");
+    const [finishWorkoutPhotos, setFinishWorkoutPhotos] = useState<File[]>([]);
     const [pendingDeleteWorkout, setPendingDeleteWorkout] = useState<WorkoutWithExercises | null>(null);
     const [pendingRemoveExercise, setPendingRemoveExercise] = useState<ExerciseDraft | null>(null);
     const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
@@ -312,6 +322,7 @@ export default function Home() {
     const [fullscreenExerciseId, setFullscreenExerciseId] = useState("");
     const [restTimerRemaining, setRestTimerRemaining] = useState(0);
     const [restTimerTotal, setRestTimerTotal] = useState(0);
+    const [restTimerEndAt, setRestTimerEndAt] = useState(0);
     const [restTimerSheetOpen, setRestTimerSheetOpen] = useState(false);
     const [restTimerExerciseId, setRestTimerExerciseId] = useState("");
     const [restTimerMinimized, setRestTimerMinimized] = useState(false);
@@ -347,10 +358,12 @@ export default function Home() {
     }, []);
 
     useEffect(() => {
-        if (!restTimerRemaining) return;
-        const timer = window.setInterval(() => setRestTimerRemaining((remaining) => Math.max(0, remaining - 1)), 1000);
+        if (!restTimerEndAt) return;
+        const updateRemaining = () => setRestTimerRemaining(Math.max(0, Math.ceil((restTimerEndAt - Date.now()) / 1000)));
+        updateRemaining();
+        const timer = window.setInterval(updateRemaining, 1000);
         return () => window.clearInterval(timer);
-    }, [restTimerRemaining]);
+    }, [restTimerEndAt]);
 
     useEffect(() => {
         if (restTimerRemaining > 0) {
@@ -359,7 +372,9 @@ export default function Home() {
         }
         if (!restTimerTotal || restTimerCompletedRef.current) return;
         restTimerCompletedRef.current = true;
+        setRestTimerEndAt(0);
         playRestTimerSound();
+        notifyRestTimerComplete();
     }, [restTimerRemaining, restTimerTotal]);
 
     useEffect(() => {
@@ -569,6 +584,25 @@ export default function Home() {
         };
     }, [exerciseName, userKey]);
 
+    const pickerRecentExerciseNames = useMemo(() => {
+        return Array.from(new Set(recentWorkouts.flatMap((workout) => (workout.workout_exercises ?? []).map((exercise) => exercise.exercise_name.trim()).filter(Boolean))));
+    }, [recentWorkouts]);
+
+    const workoutExerciseMeta = useMemo(() => {
+        return new Map(muscleCatalog.map((exercise) => [normalise(exercise.name), exercise]));
+    }, [muscleCatalog]);
+
+    const finishWorkoutPhotoPreviews = useMemo(() => finishWorkoutPhotos.map((file) => ({ file, url: URL.createObjectURL(file) })), [finishWorkoutPhotos]);
+    const editWorkoutPhotoPreviews = useMemo(() => editWorkoutPhotos.map((file) => ({ file, url: URL.createObjectURL(file) })), [editWorkoutPhotos]);
+
+    useEffect(() => {
+        return () => finishWorkoutPhotoPreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+    }, [finishWorkoutPhotoPreviews]);
+
+    useEffect(() => {
+        return () => editWorkoutPhotoPreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+    }, [editWorkoutPhotoPreviews]);
+
     useEffect(() => {
         if (!exercisePickerOpen) return;
         const query = exercisePickerSearch.trim();
@@ -579,9 +613,29 @@ export default function Home() {
 
         let cancelled = false;
         const timeout = window.setTimeout(async () => {
+            const recentRows: ExerciseSuggestion[] = pickerRecentExerciseNames
+                .filter((name) => normalise(name).includes(normalise(query)))
+                .map((name) => {
+                    const key = normalise(name);
+                    const meta = workoutExerciseMeta.get(key);
+                    return {
+                        id: key,
+                        name,
+                        category: "Recent",
+                        muscles: meta?.muscles ?? [],
+                        equipment: meta?.equipment ?? [],
+                        image_url: meta?.image_url ?? null,
+                        source: "history" as const,
+                    };
+                });
+
             if (!navigator.onLine || !isSupabaseConfigured) {
                 const cached = await searchCachedExerciseCatalog(query, 20);
-                if (!cancelled) setExercisePickerSuggestions(cached.map((exercise) => ({ ...exercise, source: "catalog" })));
+                if (!cancelled) {
+                    const suggestions = new Map<string, ExerciseSuggestion>();
+                    [...recentRows, ...cached.map((exercise) => ({ ...exercise, source: "catalog" as const }))].forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
+                    setExercisePickerSuggestions(Array.from(suggestions.values()).slice(0, 20));
+                }
                 return;
             }
 
@@ -603,7 +657,7 @@ export default function Home() {
             const rows = (data ?? []) as Omit<ExerciseSuggestion, "source">[];
             await cacheExerciseCatalog(rows);
             const suggestions = new Map<string, ExerciseSuggestion>();
-            [...customRows, ...rows.map((exercise) => ({ ...exercise, source: "catalog" as const }))].forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
+            [...recentRows, ...customRows, ...rows.map((exercise) => ({ ...exercise, source: "catalog" as const }))].forEach((exercise) => suggestions.set(normalise(exercise.name), exercise));
             setExercisePickerSuggestions(Array.from(suggestions.values()).slice(0, 20));
         }, 180);
 
@@ -611,7 +665,7 @@ export default function Home() {
             cancelled = true;
             window.clearTimeout(timeout);
         };
-    }, [exercisePickerOpen, exercisePickerSearch, userKey]);
+    }, [exercisePickerOpen, exercisePickerSearch, pickerRecentExerciseNames, userKey, workoutExerciseMeta]);
 
     useEffect(() => {
         const query = progressExercise.trim();
@@ -742,13 +796,13 @@ export default function Home() {
         async function loadMuscleCatalog() {
             const { data, error } = await supabase
                 .from("exercise_catalog")
-                .select("name,muscles,muscles_secondary,image_url")
+                .select("name,muscles,muscles_secondary,equipment,image_url")
                 .in("name", names)
                 .limit(500);
 
             const custom = userKey ? await supabase
                 .from("custom_exercises")
-                .select("name,muscles,muscles_secondary")
+                .select("name,muscles,muscles_secondary,equipment")
                 .eq("user_key", userKey)
                 .in("name", names)
                 .limit(500) : { data: [], error: null };
@@ -880,7 +934,7 @@ export default function Home() {
         return ((data ?? []) as Array<Pick<CustomExercise, "id" | "name" | "category" | "muscles" | "equipment">>).map(customSuggestion);
     }
 
-    function openCustomExerciseModal(name: string, target: "tracker" | "progress" | "edit") {
+    function openCustomExerciseModal(name: string, target: "tracker" | "progress" | "edit" | "routine" | "routine-edit") {
         setCustomExerciseName(name.trim());
         setCustomExerciseCategory("");
         setCustomExerciseMuscles([]);
@@ -920,12 +974,23 @@ export default function Home() {
         if (customExerciseTarget === "tracker") {
             addToWorkout(suggestion.name, suggestion);
             setCatalogSuggestions([]);
+            setExercisePickerOpen(false);
         } else if (customExerciseTarget === "progress") {
             setProgressExercise(suggestion.name);
             setProgressCatalogSuggestions([]);
         } else if (customExerciseTarget === "edit" && activeEditExerciseId) {
-            updateEditWorkoutExercise(activeEditExerciseId, { name: suggestion.name, image_url: suggestion.image_url });
+            updateEditWorkoutExercise(activeEditExerciseId, { name: suggestion.name, image_url: suggestion.image_url, equipment: suggestion.equipment ?? [] });
             setEditExerciseSuggestions([]);
+            setExercisePickerOpen(false);
+        } else if (customExerciseTarget === "routine") {
+            const id = crypto.randomUUID();
+            setRoutineExercises((prev) => prev.some((exercise) => normalise(exercise.name) === normalise(suggestion.name)) ? prev : [...prev, { id, name: suggestion.name, notes: "", setRows: [{ set: 1, reps: 0, weight: 0, notes: "" }], image_url: suggestion.image_url, equipment: suggestion.equipment ?? [] }]);
+            setExpandedWorkoutExerciseIds((current) => current.includes(id) ? current : [...current, id]);
+            setExercisePickerOpen(false);
+        } else if (customExerciseTarget === "routine-edit" && activeRoutineExerciseId) {
+            updateRoutineExercise(activeRoutineExerciseId, { name: suggestion.name, image_url: suggestion.image_url, equipment: suggestion.equipment ?? [] });
+            setExercisePickerOpen(false);
+            setActiveRoutineExerciseId("");
         }
         setCustomExerciseModalOpen(false);
         setToast(`${suggestion.name} added`);
@@ -976,7 +1041,7 @@ export default function Home() {
             if (!payload.exercises.length) return;
             const { data: workout, error: workoutError } = await supabase
                 .from("workouts")
-                .insert({ user_key: item.userKey, name: payload.name })
+                .insert({ user_key: item.userKey, name: payload.name, notes: payload.notes ?? null })
                 .select("id")
                 .single();
             if (workoutError || !workout) throw workoutError ?? new Error("Could not sync workout");
@@ -1191,10 +1256,6 @@ export default function Home() {
         return Array.from(new Set(exerciseHistoryRows.map((h) => h.exercise_name)));
     }, [exerciseHistoryRows]);
 
-    const workoutExerciseMeta = useMemo(() => {
-        return new Map(muscleCatalog.map((exercise) => [normalise(exercise.name), exercise]));
-    }, [muscleCatalog]);
-
     const exerciseSuggestions = useMemo(() => {
         const q = normalise(exerciseName);
         if (!q) return [];
@@ -1408,11 +1469,15 @@ export default function Home() {
             .filter((row) => Number.isFinite(row.bodyWeight) && Number.isFinite(row.exerciseWeight));
     }, [bodyWeights, progressHistory, progressExercise]);
 
-    function lastBestForSet(exerciseName: string, setNumber: number) {
+    function exerciseIsBodyweight(name: string, equipment?: string[] | null) {
+        return isBodyweightEquipment(equipment) || isBodyweightEquipment(workoutExerciseMeta.get(normalise(name))?.equipment);
+    }
+
+    function lastBestForSet(exerciseName: string, setNumber: number, bodyweight = false) {
         const record = exerciseHistoryRows.find((item) => normalise(item.exercise_name) === normalise(exerciseName));
         const row = record?.set_rows?.find((set) => Number(set.set) === setNumber);
-        if (row) return `${row.weight} lbs x ${row.reps}`;
-        if (record && setNumber === 1) return `${record.weight} lbs x ${record.reps}`;
+        if (row) return bodyweight ? `${row.reps} reps` : `${row.weight} lbs x ${row.reps}`;
+        if (record && setNumber === 1) return bodyweight ? `${record.reps} reps` : `${record.weight} lbs x ${record.reps}`;
         return "—";
     }
 
@@ -1444,23 +1509,61 @@ export default function Home() {
         }).catch(() => undefined);
     }
 
+    async function requestRestTimerNotificationPermission() {
+        if (!("Notification" in window) || Notification.permission !== "default") return;
+        try {
+            await Notification.requestPermission();
+        } catch {
+            // Notifications are optional; timer behavior should not depend on permission state.
+        }
+    }
+
+    async function notifyRestTimerComplete() {
+        if (!("Notification" in window) || Notification.permission !== "granted") return;
+        try {
+            navigator.vibrate?.([220, 100, 220]);
+            const options = {
+                body: "Time for your next set.",
+                tag: "rest-timer",
+                icon: "/icon-192.png",
+                silent: false,
+                vibrate: [220, 100, 220],
+            } as NotificationOptions;
+            if ("serviceWorker" in navigator) {
+                const registration = await navigator.serviceWorker.ready;
+                await registration.showNotification("Rest timer complete", options);
+                return;
+            }
+            new Notification("Rest timer complete", options);
+        } catch {
+            // Browsers can still suppress notifications in some background/low-power states.
+        }
+    }
+
     function startRestTimer(seconds: number) {
         if (!seconds) return;
         restAudioContext();
+        requestRestTimerNotificationPermission();
         restTimerCompletedRef.current = false;
         setRestTimerMinimized(false);
         setRestTimerTotal(seconds);
         setRestTimerRemaining(seconds);
+        setRestTimerEndAt(Date.now() + seconds * 1000);
     }
 
     function decreaseRestTimer() {
-        setRestTimerRemaining((remaining) => Math.max(0, remaining - 15));
+        setRestTimerRemaining((remaining) => {
+            const next = Math.max(0, remaining - 15);
+            setRestTimerEndAt(next ? Date.now() + next * 1000 : 0);
+            return next;
+        });
     }
 
     function increaseRestTimer() {
         setRestTimerRemaining((remaining) => {
             const next = Math.max(1, remaining + 15);
             setRestTimerTotal((total) => Math.max(total, next));
+            setRestTimerEndAt(Date.now() + next * 1000);
             return next;
         });
     }
@@ -1469,6 +1572,7 @@ export default function Home() {
         restTimerCompletedRef.current = true;
         setRestTimerRemaining(0);
         setRestTimerTotal(0);
+        setRestTimerEndAt(0);
     }
 
     function previousBestSetValues(exerciseName: string, setNumber: number) {
@@ -1497,10 +1601,10 @@ export default function Home() {
         }, null);
     }
 
-    function validSetRows(sourceSets = sets) {
+    function validSetRows(sourceSets = sets, bodyweight = false) {
         return sourceSets
             .filter((set) => set.completed)
-            .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: set.weight === "" ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
+            .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: bodyweight || set.weight === "" ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
             .filter((set) => Number.isFinite(set.reps) && set.reps > 0 && Number.isFinite(set.weight) && set.weight >= 0);
     }
 
@@ -1632,7 +1736,7 @@ export default function Home() {
     function addSelectedPickerExercises() {
         if (exercisePickerMode === "edit") {
             const selected = selectedPickerExercises[0];
-            if (selected && activeEditExerciseId) updateEditWorkoutExercise(activeEditExerciseId, { name: selected.name, image_url: selected.image_url });
+            if (selected && activeEditExerciseId) updateEditWorkoutExercise(activeEditExerciseId, { name: selected.name, image_url: selected.image_url, equipment: selected.equipment ?? [] });
             setExercisePickerOpen(false);
             setExercisePickerMode("track");
             setSelectedPickerExercises([]);
@@ -1641,7 +1745,7 @@ export default function Home() {
 
         if (exercisePickerMode === "routine-edit") {
             const selected = selectedPickerExercises[0];
-            if (selected && activeRoutineExerciseId) updateRoutineExercise(activeRoutineExerciseId, { name: selected.name, image_url: selected.image_url });
+            if (selected && activeRoutineExerciseId) updateRoutineExercise(activeRoutineExerciseId, { name: selected.name, image_url: selected.image_url, equipment: selected.equipment ?? [] });
             setExercisePickerOpen(false);
             setExercisePickerMode("track");
             setSelectedPickerExercises([]);
@@ -1657,6 +1761,7 @@ export default function Home() {
                 notes: "",
                 setRows: [{ set: 1, reps: 0, weight: 0, notes: "" }],
                 image_url: exercise.image_url ?? null,
+                equipment: exercise.equipment ?? [],
             }));
             setRoutineExercises((prev) => [...prev, ...nextExercises]);
             setExpandedWorkoutExerciseIds((current) => [...current, ...nextExercises.map((exercise) => exercise.id)]);
@@ -1707,7 +1812,7 @@ export default function Home() {
 
         const rows = workoutQueue
             .filter((exercise) => !exercise.savedExerciseId)
-            .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets) }))
+            .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets, exerciseIsBodyweight(exercise.name, exercise.equipment)) }))
             .filter((exercise) => exercise.name && exercise.sets.length);
 
         if (!isSupabaseConfigured) return alert("Add Supabase env vars in .env.local first.");
@@ -1747,7 +1852,7 @@ export default function Home() {
     async function confirmSaveWorkout(titleOverride?: string) {
         const rows = workoutQueue
             .filter((exercise) => !exercise.savedExerciseId)
-            .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets) }))
+            .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets, exerciseIsBodyweight(exercise.name, exercise.equipment)) }))
             .filter((exercise) => exercise.name && exercise.sets.length);
         const title = titleOverride?.trim() || workoutNameInput.trim() || workoutTitle;
 
@@ -1762,6 +1867,7 @@ export default function Home() {
                 type: "save_workout",
                 payload: {
                     name: title,
+                    notes: null,
                     exercises: rows.map(({ exercise, name, sets }) => ({ name, sets, notes: exercise.notes?.trim() || null, body_weight: currentBodyWeight })),
                 } satisfies OfflineWorkoutPayload,
             });
@@ -1778,7 +1884,7 @@ export default function Home() {
         setSaving(true);
         const { data: workout, error: workoutError } = await supabase
             .from("workouts")
-            .insert({ user_key: userKey, name: title, duration_seconds: workoutElapsedSeconds })
+            .insert({ user_key: userKey, name: title, notes: null, duration_seconds: workoutElapsedSeconds })
             .select("id")
             .single();
 
@@ -1818,7 +1924,22 @@ export default function Home() {
         return true;
     }
 
-    async function saveFinishedWorkout(title: string, rows: Array<{ exercise: ExerciseDraft; name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }> }>) {
+    async function uploadWorkoutPhotos(workoutId: string, photos: File[]) {
+        const urls: string[] = [];
+        for (const [index, photo] of photos.entries()) {
+            const extension = photo.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+            const path = `${userKey}/${workoutId}/${Date.now()}-${index}.${extension}`;
+            const { error } = await supabase.storage.from("workout-images").upload(path, photo, { contentType: photo.type || "image/jpeg" });
+            if (error) throw error;
+            const { data } = supabase.storage.from("workout-images").getPublicUrl(path);
+            urls.push(data.publicUrl);
+        }
+        return urls;
+    }
+
+    async function saveFinishedWorkout(details: FinishWorkoutDetails, rows: Array<{ exercise: ExerciseDraft; name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }> }>) {
+        const title = details.title.trim() || formatWorkoutName();
+        const notes = details.notes.trim() || null;
         if (!isSupabaseConfigured) {
             alert("Add Supabase env vars in .env.local first.");
             return false;
@@ -1833,22 +1954,36 @@ export default function Home() {
                 type: "save_workout",
                 payload: {
                     name: title,
+                    notes,
                     exercises: rows.map(({ exercise, name, sets }) => ({ name, sets, notes: exercise.notes?.trim() || null, body_weight: currentBodyWeight })),
                 } satisfies OfflineWorkoutPayload,
             });
             await refreshOfflineCount();
             setWorkoutQueue((prev) => prev.map((exercise) => rows.some((row) => row.exercise.id === exercise.id) ? { ...exercise, savedExerciseId: offlineId("workout", queueId) } : exercise));
+            if (details.photos.length) alert("Workout saved offline. Add photos again when you're online.");
             return true;
         }
 
         const { data: workout, error: workoutError } = await supabase
             .from("workouts")
-            .insert({ user_key: userKey, name: title, duration_seconds: workoutElapsedSeconds })
+            .insert({ user_key: userKey, name: title, notes, duration_seconds: workoutElapsedSeconds, photo_urls: [] })
             .select("id")
             .single();
         if (workoutError || !workout) {
             alert(workoutError?.message ?? "Could not finish workout");
             return false;
+        }
+
+        if (details.photos.length) {
+            try {
+                const photoUrls = await uploadWorkoutPhotos(workout.id, details.photos);
+                const { error: photoError } = await supabase.from("workouts").update({ photo_urls: photoUrls }).eq("id", workout.id).eq("user_key", userKey);
+                if (photoError) throw photoError;
+            } catch (error) {
+                await supabase.from("workouts").delete().eq("id", workout.id).eq("user_key", userKey);
+                alert(error instanceof Error ? error.message : "Could not upload workout photos");
+                return false;
+            }
         }
 
         const payload = rows.map(({ exercise, name, sets }) => ({
@@ -1877,11 +2012,15 @@ export default function Home() {
         setEditingWorkoutId(workout.id);
         setEditingWorkoutFullscreen(Boolean(options.fullscreen));
         setEditWorkoutName(workout.name || formatWorkoutName(new Date(workout.created_at)));
+        setEditWorkoutNotes(workout.notes ?? "");
+        setEditWorkoutPhotoUrls(workout.photo_urls ?? []);
+        setEditWorkoutPhotos([]);
         setEditWorkoutExercises((workout.workout_exercises ?? []).map((exercise) => ({
             id: exercise.id,
             name: exercise.exercise_name,
             notes: exercise.notes ?? "",
             image_url: workoutExerciseMeta.get(normalise(exercise.exercise_name))?.image_url ?? null,
+            equipment: workoutExerciseMeta.get(normalise(exercise.exercise_name))?.equipment ?? [],
             setRows: (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight }]).map((set, index) => ({
                 set: index + 1,
                 reps: Number(set.reps),
@@ -1895,6 +2034,9 @@ export default function Home() {
         setEditingWorkoutId("");
         setEditingWorkoutFullscreen(false);
         setEditWorkoutName("");
+        setEditWorkoutNotes("");
+        setEditWorkoutPhotoUrls([]);
+        setEditWorkoutPhotos([]);
         setEditWorkoutExercises([]);
     }
 
@@ -1922,17 +2064,6 @@ export default function Home() {
         setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? {
             ...exercise,
             setRows: exercise.setRows.filter((_, index) => index !== setIndex).map((set, index) => ({ ...set, set: index + 1 })),
-        } : exercise));
-    }
-
-    function adjustEditWorkoutSet(exerciseId: string, setIndex: number, field: "reps" | "weight", delta: number) {
-        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? {
-            ...exercise,
-            setRows: exercise.setRows.map((set, index) => {
-                if (index !== setIndex) return set;
-                const nextValue = Math.max(0, Number(set[field] || 0) + delta);
-                return { ...set, [field]: nextValue };
-            }),
         } : exercise));
     }
 
@@ -1974,7 +2105,7 @@ export default function Home() {
 
     function addEditWorkoutExercise() {
         const id = `new-${crypto.randomUUID()}`;
-        setEditWorkoutExercises((prev) => [...prev, { id, name: "", notes: "", setRows: [{ set: 1, reps: 0, weight: 0, notes: "" }], isNew: true }]);
+        setEditWorkoutExercises((prev) => [...prev, { id, name: "", notes: "", setRows: [{ set: 1, reps: 0, weight: 0, notes: "" }], equipment: [], isNew: true }]);
         setExpandedWorkoutExerciseIds((prev) => [...prev, id]);
         setActiveEditExerciseId(id);
     }
@@ -2006,16 +2137,6 @@ export default function Home() {
         } : exercise));
     }
 
-    function adjustRoutineSet(exerciseId: string, setIndex: number, field: "reps" | "weight", delta: number) {
-        setRoutineExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? {
-            ...exercise,
-            setRows: exercise.setRows.map((set, index) => {
-                if (index !== setIndex) return set;
-                return { ...set, [field]: Math.max(0, Number(set[field] || 0) + delta) };
-            }),
-        } : exercise));
-    }
-
     function removeRoutineExercise(exerciseId: string) {
         setRoutineExercises((prev) => prev.filter((exercise) => exercise.id !== exerciseId));
     }
@@ -2036,6 +2157,7 @@ export default function Home() {
                 name: exercise.exercise_name,
                 notes: exercise.notes ?? "",
                 image_url: meta?.image_url ?? null,
+                equipment: meta?.equipment ?? [],
                 setRows: (exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: 0, weight: 0 }]).map((set, index) => ({
                     set: index + 1,
                     reps: Number(set.reps),
@@ -2065,8 +2187,9 @@ export default function Home() {
         if (!userKey) return alert("Sign in before saving a routine.");
         if (!title) return alert("Add a routine title.");
         const exercises = routineExercises.map((exercise) => {
+            const isBodyweight = exerciseIsBodyweight(exercise.name, exercise.equipment);
             const rows = exercise.setRows
-                .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: Number(set.weight), notes: set.notes?.trim() || undefined }))
+                .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: isBodyweight ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
                 .filter((set) => Number.isFinite(set.reps) && set.reps > 0 && Number.isFinite(set.weight) && set.weight >= 0);
             return { ...exercise, setRows: rows };
         }).filter((exercise) => exercise.name.trim() && exercise.setRows.length);
@@ -2133,7 +2256,7 @@ export default function Home() {
                 image_url: meta?.image_url ?? null,
                 category: null,
                 muscles: [],
-                equipment: [],
+                equipment: meta?.equipment ?? [],
                 notes: exercise.notes ?? "",
                 restTimerSeconds: 0,
             };
@@ -2154,15 +2277,26 @@ export default function Home() {
     async function saveEditWorkout(workout: WorkoutWithExercises) {
         const workoutName = editWorkoutName.trim() || formatWorkoutName(new Date(workout.created_at));
         const exerciseUpdates = editWorkoutExercises.map((exercise) => {
+            const isBodyweight = exerciseIsBodyweight(exercise.name, exercise.equipment);
             const rows = exercise.setRows
-                .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: Number(set.weight), notes: set.notes?.trim() || undefined }))
+                .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: isBodyweight ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
                 .filter((set) => Number.isFinite(set.reps) && set.reps > 0 && Number.isFinite(set.weight) && set.weight >= 0);
             return { ...exercise, setRows: rows };
         }).filter((exercise) => exercise.name.trim() && exercise.setRows.length);
 
         if (!exerciseUpdates.length) return alert("Keep at least one exercise with a valid set.");
 
-        const { error: workoutError } = await supabase.from("workouts").update({ name: workoutName }).eq("id", workout.id).eq("user_key", userKey);
+        let nextPhotoUrls = editWorkoutPhotoUrls;
+        if (editWorkoutPhotos.length) {
+            try {
+                const uploadedPhotoUrls = await uploadWorkoutPhotos(workout.id, editWorkoutPhotos);
+                nextPhotoUrls = [...editWorkoutPhotoUrls, ...uploadedPhotoUrls];
+            } catch (error) {
+                return alert(error instanceof Error ? error.message : "Could not upload workout photos");
+            }
+        }
+
+        const { error: workoutError } = await supabase.from("workouts").update({ name: workoutName, notes: editWorkoutNotes.trim() || null, photo_urls: nextPhotoUrls }).eq("id", workout.id).eq("user_key", userKey);
         if (workoutError) return alert(workoutError.message);
 
         const keptExerciseIds = new Set(exerciseUpdates.map((exercise) => exercise.id));
@@ -2189,6 +2323,8 @@ export default function Home() {
             if (error) return alert(error.message);
         }
 
+        setEditWorkoutPhotoUrls(nextPhotoUrls);
+        setEditWorkoutPhotos([]);
         cancelEditWorkout();
         await loadData();
         setToast(`${workoutName} updated`);
@@ -2360,7 +2496,25 @@ export default function Home() {
     }
 
     function toggleQueuedSetCompleted(exerciseId: string, setId: string, completed: boolean, restSeconds: number) {
-        updateQueuedSet(exerciseId, setId, { completed });
+        setWorkoutQueue((prev) => prev.map((exercise) => {
+            if (exercise.id !== exerciseId) return exercise;
+            const isBodyweight = exerciseIsBodyweight(exercise.name, exercise.equipment);
+            return {
+                ...exercise,
+                sets: exercise.sets.map((set, index) => {
+                    if (set.id !== setId) return set;
+                    if (!completed) return { ...set, completed };
+                    const fallback = previousBestSetValues(exercise.name, index + 1);
+                    return {
+                        ...set,
+                        completed,
+                        prefilled: false,
+                        reps: set.reps || fallback?.reps || "",
+                        weight: isBodyweight ? "0" : set.weight || fallback?.weight || "",
+                    };
+                }),
+            };
+        }));
         if (completed) startRestTimer(restSeconds);
     }
 
@@ -2369,34 +2523,6 @@ export default function Home() {
             if (exercise.id !== exerciseId) return exercise;
             const nextSet = trackerSetFromPreviousBest(exercise.name, exercise.sets.length + 1);
             return { ...exercise, sets: [...exercise.sets, nextSet] };
-        }));
-    }
-
-    function adjustQueuedSetReps(exerciseId: string, setId: string, delta: number) {
-        setWorkoutQueue((prev) => prev.map((exercise) => {
-            if (exercise.id !== exerciseId) return exercise;
-            return {
-                ...exercise,
-                sets: exercise.sets.map((set) => {
-                    if (set.id !== setId) return set;
-                    const current = Number(set.reps) || 0;
-                    return { ...set, reps: String(Math.max(0, current + delta)), prefilled: false };
-                }),
-            };
-        }));
-    }
-
-    function adjustQueuedSetWeight(exerciseId: string, setId: string, delta: number) {
-        setWorkoutQueue((prev) => prev.map((exercise) => {
-            if (exercise.id !== exerciseId) return exercise;
-            return {
-                ...exercise,
-                sets: exercise.sets.map((set) => {
-                    if (set.id !== setId) return set;
-                    const current = Number(set.weight) || 0;
-                    return { ...set, weight: String(Math.max(0, current + delta)), prefilled: false };
-                }),
-            };
         }));
     }
 
@@ -2437,28 +2563,36 @@ export default function Home() {
         setFullscreenExerciseId(workoutQueue[0]?.id ?? "workout");
     }
 
-    async function finishWorkout() {
+    function openFinishDetailsModal() {
         const validExercises = workoutQueue
-            .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets) }))
+            .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets, exerciseIsBodyweight(exercise.name, exercise.equipment)) }))
+            .filter(({ name, sets }) => name && sets.length);
+
+        if (!validExercises.length) return alert("Complete at least one valid set before finishing.");
+        setFinishWorkoutNameInput(workoutTitle);
+        setFinishWorkoutNotes("");
+        setFinishWorkoutPhotos([]);
+        setFinishSummary(null);
+        setFinishDetailsModalOpen(true);
+    }
+
+    async function finishWorkout(details: FinishWorkoutDetails) {
+        const validExercises = workoutQueue
+            .map((exercise) => ({ exercise, name: exercise.name.trim(), sets: validSetRows(exercise.sets, exerciseIsBodyweight(exercise.name, exercise.equipment)) }))
             .filter(({ name, sets }) => name && sets.length);
 
         if (!validExercises.length) return alert("Complete at least one valid set before finishing.");
 
         setSaving(true);
-        const saved = await saveFinishedWorkout(workoutTitle, validExercises);
+        const saved = await saveFinishedWorkout(details, validExercises);
         if (!saved) {
             setSaving(false);
             return;
         }
         setSaving(false);
+        setFinishDetailsModalOpen(false);
 
-        setFinishSummary({
-            title: workoutTitle,
-            duration: workoutDurationLabel,
-            volume: workoutStatsVolume,
-            sets: workoutStatsSetCount,
-            exercises: validExercises.length,
-        });
+        setFinishSummary(null);
         setWorkoutQueue([]);
         setCollapsedQueueIds([]);
         setFullscreenExerciseId("");
@@ -2477,7 +2611,7 @@ export default function Home() {
         return () => window.clearInterval(timer);
     }, [draftWorkoutActive, fullscreenExerciseId, workoutQueue.length]);
 
-    const workoutStatsRows = workoutQueue.flatMap((exercise) => validSetRows(exercise.sets));
+    const workoutStatsRows = workoutQueue.flatMap((exercise) => validSetRows(exercise.sets, exerciseIsBodyweight(exercise.name, exercise.equipment)));
     const workoutStatsSetCount = workoutStatsRows.length;
     const workoutStatsVolume = workoutStatsRows.reduce((sum, set) => sum + set.reps * set.weight, 0);
     const canFinishWorkout = workoutStatsSetCount > 0;
@@ -2573,6 +2707,7 @@ export default function Home() {
                             )}
                             {routineExercises.map((exercise) => {
                                 const isRoutineExerciseExpanded = expandedWorkoutExerciseIds.includes(exercise.id);
+                                const isBodyweightRoutineExercise = exerciseIsBodyweight(exercise.name, exercise.equipment);
                                 const exerciseHistory = exerciseHistoryRows.filter((record) => normalise(record.exercise_name) === normalise(exercise.name)).slice(0, 3);
                                 const isHistoryOpen = expandedHistoryExerciseIds.includes(exercise.id);
                                 return (
@@ -2641,8 +2776,8 @@ export default function Home() {
                                             </div>
                                         )}
                                         <div className="queued-set-table saved-edit-set-table routine-set-table">
-                                            <div className="set-grid queued-set-grid table-head saved-edit-set-grid routine-set-grid" aria-hidden="true">
-                                                <span>Set</span><span>Weight</span><span>Reps</span>
+                                            <div className={isBodyweightRoutineExercise ? "set-grid queued-set-grid table-head saved-edit-set-grid routine-set-grid bodyweight-routine-set-grid" : "set-grid queued-set-grid table-head saved-edit-set-grid routine-set-grid"} aria-hidden="true">
+                                                <span>Set</span>{!isBodyweightRoutineExercise && <span>Weight</span>}<span>Reps</span>
                                             </div>
                                             {exercise.setRows.map((set, index) => {
                                                 const routineSetSwipeId = `routine-${exercise.id}-${index}`;
@@ -2652,7 +2787,7 @@ export default function Home() {
                                                     <div className={isSwipeOpen ? "swipe-set-row saved-edit-swipe-row swipe-open" : "swipe-set-row saved-edit-swipe-row"} key={`${exercise.id}-${index}`}>
                                                         <button className="swipe-delete-action" type="button" tabIndex={isSwipeOpen ? 0 : -1} onClick={() => { removeRoutineSet(exercise.id, index); setOpenSwipeSet(null); }}>Delete</button>
                                                         <motion.div
-                                                            className="set-grid queued-set-grid saved-edit-set-grid routine-set-grid routine-set-row"
+                                                            className={isBodyweightRoutineExercise ? "set-grid queued-set-grid saved-edit-set-grid routine-set-grid routine-set-row bodyweight-routine-set-grid" : "set-grid queued-set-grid saved-edit-set-grid routine-set-grid routine-set-row"}
                                                             animate={{ x: swipeOffset }}
                                                             transition={activeSwipeSetId === routineSetSwipeId ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}
                                                             onPointerDown={(event) => startSavedSetSwipe(event, exercise.id, routineSetSwipeId)}
@@ -2661,15 +2796,11 @@ export default function Home() {
                                                             onPointerCancel={endSavedSetSwipe}
                                                         >
                                                             <span className="set-number">{index + 1}</span>
-                                                            <div className="weight-control">
+                                                            {!isBodyweightRoutineExercise && <div className="weight-control">
                                                                 <input className="input weight-input" inputMode="decimal" value={set.weight} onChange={(event) => updateRoutineSet(exercise.id, index, { weight: event.target.value.replace(/[^0-9.]/g, "") })} />
-                                                                <button className="weight-step-btn weight-step-btn-left" type="button" aria-label={`Decrease ${exercise.name} set ${index + 1} weight by 5 lbs`} onClick={() => adjustRoutineSet(exercise.id, index, "weight", -5)}><Minus size={14} /></button>
-                                                                <button className="weight-step-btn weight-step-btn-right" type="button" aria-label={`Increase ${exercise.name} set ${index + 1} weight by 5 lbs`} onClick={() => adjustRoutineSet(exercise.id, index, "weight", 5)}><Plus size={14} /></button>
-                                                            </div>
+                                                            </div>}
                                                             <div className="reps-control">
                                                                 <input className="input reps-input" inputMode="numeric" value={set.reps} onChange={(event) => updateRoutineSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
-                                                                <button className="reps-step-btn reps-step-btn-left" type="button" aria-label={`Decrease ${exercise.name} set ${index + 1} reps`} onClick={() => adjustRoutineSet(exercise.id, index, "reps", -1)}><Minus size={14} /></button>
-                                                                <button className="reps-step-btn reps-step-btn-right" type="button" aria-label={`Increase ${exercise.name} set ${index + 1} reps`} onClick={() => adjustRoutineSet(exercise.id, index, "reps", 1)}><Plus size={14} /></button>
                                                             </div>
                                                         </motion.div>
                                                     </div>
@@ -2728,7 +2859,7 @@ export default function Home() {
                                 </label>
                                 <div className="expanded-view-actions">
                                     <button className="bare-icon-btn" aria-label="Clear all" type="button" onClick={() => setClearDraftModalOpen(true)}><Eraser size={18} /></button>
-                                    <button className={canFinishWorkout ? "btn finish-workout-compact-btn can-finish" : "btn finish-workout-compact-btn"} type="button" disabled={saving || !canFinishWorkout} onClick={finishWorkout}>Finish</button>
+                                    <button className={canFinishWorkout ? "btn finish-workout-compact-btn can-finish" : "btn finish-workout-compact-btn"} type="button" disabled={saving || !canFinishWorkout} onClick={openFinishDetailsModal}>Finish</button>
                                 </div>
                             </div>
                             <div className="expanded-workout-stats" aria-label="Workout summary">
@@ -2758,7 +2889,8 @@ export default function Home() {
                             </div>
                         )}
                         {workoutQueue.map((exercise) => {
-                            const rows = validSetRows(exercise.sets);
+                            const isBodyweightExercise = exerciseIsBodyweight(exercise.name, exercise.equipment);
+                            const rows = validSetRows(exercise.sets, isBodyweightExercise);
                             const volume = rows.reduce((sum, set) => sum + set.reps * set.weight, 0);
                             const isCollapsed = collapsedQueueIds.includes(exercise.id);
                             const meta = [exercise.category, exercise.muscles?.[0], exercise.equipment?.[0]].filter(Boolean).join(" • ");
@@ -2858,9 +2990,9 @@ export default function Home() {
                                                 </div>
                                             )}
                                             <div className="queued-set-table">
-                                                <div className="set-grid queued-set-grid table-head" style={isFullscreen ? { gridTemplateColumns: "28px minmax(76px,1.2fr) minmax(56px,.8fr) minmax(70px,1fr) 40px", gap: 0 } : { gridTemplateColumns: "32px minmax(92px,1.2fr) minmax(66px,.8fr) minmax(82px,1fr) 42px", gap: 0, minWidth: 332 }} aria-hidden="true">
+                                                <div className={isBodyweightExercise ? "set-grid queued-set-grid table-head bodyweight-set-grid" : "set-grid queued-set-grid table-head"} style={isBodyweightExercise ? undefined : isFullscreen ? { gridTemplateColumns: "28px minmax(76px,1.2fr) minmax(56px,.8fr) minmax(70px,1fr) 40px", gap: 0 } : { gridTemplateColumns: "32px minmax(92px,1.2fr) minmax(66px,.8fr) minmax(82px,1fr) 42px", gap: 0, minWidth: 332 }} aria-hidden="true">
                                                     <span>Set</span>
-                                                    <span>Weight</span>
+                                                    {!isBodyweightExercise && <span>Weight</span>}
                                                     <span>Reps</span>
                                                     <span>Best</span>
                                                     <span className="set-complete-label"><Check size={13} /></span>
@@ -2868,12 +3000,13 @@ export default function Home() {
                                                 {exercise.sets.map((set, index) => {
                                                     const swipeOffset = openSwipeSet?.exerciseId === exercise.id && openSwipeSet.setId === set.id ? openSwipeSet.offset : 0;
                                                     const isSwipeOpen = swipeOffset < 0;
+                                                    const fallbackValues = previousBestSetValues(exercise.name, index + 1);
                                                     return (
                                                         <div className={isSwipeOpen ? "swipe-set-row swipe-open" : "swipe-set-row"} style={isFullscreen ? undefined : { minWidth: 332 }} key={set.id}>
                                                             <button className="swipe-delete-action" type="button" tabIndex={isSwipeOpen ? 0 : -1} onClick={() => { removeQueuedSet(exercise.id, set.id); setOpenSwipeSet(null); }}>Delete</button>
                                                             <motion.div
-                                                                className={`set-grid queued-set-grid draggable-row tracker-set-row ${set.completed ? "completed" : "unchecked"}`}
-                                                                style={isFullscreen ? { gridTemplateColumns: "28px minmax(76px,1.2fr) minmax(56px,.8fr) minmax(70px,1fr) 40px", gap: 0 } : { gridTemplateColumns: "32px minmax(92px,1.2fr) minmax(66px,.8fr) minmax(82px,1fr) 42px", gap: 0, minWidth: 332 }}
+                                                                className={`set-grid queued-set-grid draggable-row tracker-set-row ${isBodyweightExercise ? "bodyweight-set-grid" : ""} ${set.completed ? "completed" : "unchecked"}`}
+                                                                style={isBodyweightExercise ? undefined : isFullscreen ? { gridTemplateColumns: "28px minmax(76px,1.2fr) minmax(56px,.8fr) minmax(70px,1fr) 40px", gap: 0 } : { gridTemplateColumns: "32px minmax(92px,1.2fr) minmax(66px,.8fr) minmax(82px,1fr) 42px", gap: 0, minWidth: 332 }}
                                                                 drag="x"
                                                                 dragConstraints={{ left: -SWIPE_DELETE_WIDTH, right: 0 }}
                                                                 dragElastic={0.12}
@@ -2889,31 +3022,29 @@ export default function Home() {
                                                                 }}
                                                             >
                                                                 <span className="set-number">{index + 1}</span>
-                                                                <div className="weight-control">
-                                                                    <input
-                                                                        className={set.prefilled && !set.completed ? "input weight-input prefilled-value" : "input weight-input"}
-                                                                        inputMode="decimal"
-                                                                        aria-label={`${exercise.name} set ${index + 1} weight in lbs`}
-                                                                        placeholder="0"
-                                                                        value={set.weight}
-                                                                        onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, ""), prefilled: false })}
-                                                                    />
-                                                                    <button className="weight-step-btn weight-step-btn-left" type="button" aria-label={`Decrease ${exercise.name} set ${index + 1} weight by 5 lbs`} onClick={() => adjustQueuedSetWeight(exercise.id, set.id, -5)}><Minus size={14} /></button>
-                                                                    <button className="weight-step-btn weight-step-btn-right" type="button" aria-label={`Increase ${exercise.name} set ${index + 1} weight by 5 lbs`} onClick={() => adjustQueuedSetWeight(exercise.id, set.id, 5)}><Plus size={14} /></button>
-                                                                </div>
+                                                                {!isBodyweightExercise && (
+                                                                    <div className="weight-control">
+                                                                        <input
+                                                                            className={set.prefilled && !set.completed ? "input weight-input prefilled-value" : "input weight-input"}
+                                                                            inputMode="decimal"
+                                                                            aria-label={`${exercise.name} set ${index + 1} weight in lbs`}
+                                                                            placeholder={set.prefilled && !set.completed && set.weight ? set.weight : set.weight ? "0" : fallbackValues?.weight ?? "0"}
+                                                                            value={set.prefilled && !set.completed ? "" : set.weight}
+                                                                            onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, ""), prefilled: false })}
+                                                                        />
+                                                                    </div>
+                                                                )}
                                                                 <div className="reps-control">
                                                                     <input
                                                                         className={set.prefilled && !set.completed ? "input reps-input prefilled-value" : "input reps-input"}
                                                                         inputMode="numeric"
                                                                         aria-label={`${exercise.name} set ${index + 1} reps`}
-                                                                        placeholder="0"
-                                                                        value={set.reps}
+                                                                        placeholder={set.prefilled && !set.completed && set.reps ? set.reps : set.reps ? "0" : fallbackValues?.reps ?? "0"}
+                                                                        value={set.prefilled && !set.completed ? "" : set.reps}
                                                                         onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, ""), prefilled: false })}
                                                                     />
-                                                                    <button className="reps-step-btn reps-step-btn-left" type="button" aria-label={`Decrease ${exercise.name} set ${index + 1} reps`} onClick={() => adjustQueuedSetReps(exercise.id, set.id, -1)}><Minus size={14} /></button>
-                                                                    <button className="reps-step-btn reps-step-btn-right" type="button" aria-label={`Increase ${exercise.name} set ${index + 1} reps`} onClick={() => adjustQueuedSetReps(exercise.id, set.id, 1)}><Plus size={14} /></button>
                                                                 </div>
-                                                                <span className="last-best">{lastBestForSet(exercise.name, index + 1)}</span>
+                                                                <span className="last-best">{lastBestForSet(exercise.name, index + 1, isBodyweightExercise)}</span>
                                                                 <button
                                                                     className="set-complete-btn"
                                                                     type="button"
@@ -2991,7 +3122,58 @@ export default function Home() {
                                     <span><small>Sets</small><strong>{editWorkoutSetCount}</strong></span>
                                 </div>
                             </div>
-                            <div className="workout-list">
+                            <div className="saved-workout-editor-scroll">
+                                <div className="edit-workout-details-panel">
+                                    <label className="field-label">
+                                        <span>Description</span>
+                                        <textarea className="input finish-description-input" rows={4} value={editWorkoutNotes} onChange={(event) => setEditWorkoutNotes(event.target.value)} placeholder="Add workout description..." />
+                                    </label>
+                                    {editWorkoutPhotoUrls.length > 0 && (
+                                        <div className="field-label">
+                                            <span>Images</span>
+                                            <label className="finish-photo-picker edit-workout-photo-picker">
+                                                <input type="file" accept="image/*" multiple onChange={(event) => { const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/")); setEditWorkoutPhotos((current) => [...current, ...files]); event.target.value = ""; }} />
+                                                <Plus size={18} />
+                                                <span>Add images</span>
+                                            </label>
+                                            <div className="workout-photo-grid edit-workout-photo-grid">
+                                                {editWorkoutPhotoUrls.map((url, index) => (
+                                                    <div className="edit-workout-photo" key={`${workout.id}-edit-photo-${index}`}>
+                                                        <button className="edit-workout-photo-open" type="button" aria-label="View image" onClick={() => setPreviewImageUrl(url)}><img src={url} alt="" /></button>
+                                                        <button className="edit-workout-photo-remove" type="button" aria-label="Remove image" onClick={() => setEditWorkoutPhotoUrls((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
+                                                    </div>
+                                                ))}
+                                                {editWorkoutPhotoPreviews.map((preview, index) => (
+                                                    <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
+                                                        <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                        <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    {!editWorkoutPhotoUrls.length && (
+                                        <div className="field-label">
+                                            <span>Images</span>
+                                            <label className="finish-photo-picker edit-workout-photo-picker">
+                                                <input type="file" accept="image/*" multiple onChange={(event) => { const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/")); setEditWorkoutPhotos((current) => [...current, ...files]); event.target.value = ""; }} />
+                                                <Plus size={18} />
+                                                <span>Add images</span>
+                                            </label>
+                                            {editWorkoutPhotoPreviews.length > 0 && (
+                                                <div className="workout-photo-grid edit-workout-photo-grid">
+                                                    {editWorkoutPhotoPreviews.map((preview, index) => (
+                                                        <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
+                                                            <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                            <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="workout-list">
                                 {editWorkoutExercises.length === 0 && (
                                     <div className="expanded-workout-empty">
                                         <Dumbbell size={28} />
@@ -3004,6 +3186,7 @@ export default function Home() {
                                     const rows = exercise.setRows.filter((set) => Number(set.reps) > 0 && Number(set.weight) >= 0);
                                     const volume = rows.reduce((sum, set) => sum + Number(set.reps) * Number(set.weight), 0);
                                     const exerciseMeta = workoutExerciseMeta.get(normalise(exercise.name));
+                                    const isBodyweightEditExercise = exerciseIsBodyweight(exercise.name, exercise.equipment ?? exerciseMeta?.equipment);
                                     const exerciseImageUrl = exercise.image_url ?? exerciseMeta?.image_url;
                                     return (
                                         <div className="workout-exercise-section expanded-workout-exercise" key={exercise.id}>
@@ -3033,9 +3216,9 @@ export default function Home() {
                                                     </div>
                                                     <textarea className="input exercise-notes-input saved-edit-exercise-notes" rows={1} aria-label={`${exercise.name || "Exercise"} notes`} placeholder="Add exercise notes here..." value={exercise.notes} onChange={(event) => updateEditWorkoutExercise(exercise.id, { notes: event.target.value })} />
                                                     <div className="queued-set-table saved-edit-set-table">
-                                                        <div className="set-grid queued-set-grid table-head saved-edit-set-grid" aria-hidden="true">
+                                                        <div className={isBodyweightEditExercise ? "set-grid queued-set-grid table-head saved-edit-set-grid bodyweight-edit-set-grid" : "set-grid queued-set-grid table-head saved-edit-set-grid"} aria-hidden="true">
                                                             <span>Set</span>
-                                                            <span>Weight</span>
+                                                            {!isBodyweightEditExercise && <span>Weight</span>}
                                                             <span>Reps</span>
                                                             <span>Best</span>
                                                         </div>
@@ -3055,19 +3238,15 @@ export default function Home() {
                                                                         onPointerUp={endSavedSetSwipe}
                                                                         onPointerCancel={endSavedSetSwipe}
                                                                     >
-                                                                        <div className="set-grid queued-set-grid saved-edit-set-grid">
+                                                                        <div className={isBodyweightEditExercise ? "set-grid queued-set-grid saved-edit-set-grid bodyweight-edit-set-grid" : "set-grid queued-set-grid saved-edit-set-grid"}>
                                                                             <span className="set-number">{index + 1}</span>
-                                                                            <div className="weight-control">
+                                                                            {!isBodyweightEditExercise && <div className="weight-control">
                                                                                 <input className="input weight-input" inputMode="decimal" aria-label={`${exercise.name || "Exercise"} set ${index + 1} weight in lbs`} placeholder="0" value={set.weight} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
-                                                                                <button className="weight-step-btn weight-step-btn-left" type="button" aria-label="Decrease weight by 5 lbs" onClick={() => adjustEditWorkoutSet(exercise.id, index, "weight", -5)}><Minus size={14} /></button>
-                                                                                <button className="weight-step-btn weight-step-btn-right" type="button" aria-label="Increase weight by 5 lbs" onClick={() => adjustEditWorkoutSet(exercise.id, index, "weight", 5)}><Plus size={14} /></button>
-                                                                            </div>
+                                                                            </div>}
                                                                             <div className="reps-control">
                                                                                 <input className="input reps-input" inputMode="numeric" aria-label={`${exercise.name || "Exercise"} set ${index + 1} reps`} placeholder="0" value={set.reps} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
-                                                                                <button className="reps-step-btn reps-step-btn-left" type="button" aria-label="Decrease reps" onClick={() => adjustEditWorkoutSet(exercise.id, index, "reps", -1)}><Minus size={14} /></button>
-                                                                                <button className="reps-step-btn reps-step-btn-right" type="button" aria-label="Increase reps" onClick={() => adjustEditWorkoutSet(exercise.id, index, "reps", 1)}><Plus size={14} /></button>
                                                                             </div>
-                                                                            <span className="last-best saved-edit-best">{exercise.name.trim() ? lastBestForSet(exercise.name, index + 1) : "—"}</span>
+                                                                            <span className="last-best saved-edit-best">{exercise.name.trim() ? lastBestForSet(exercise.name, index + 1, isBodyweightEditExercise) : "—"}</span>
                                                                         </div>
                                                                     </motion.div>
                                                                 </div>
@@ -3082,6 +3261,7 @@ export default function Home() {
                                         </div>
                                     );
                                 })}
+                                </div>
                             </div>
                             <motion.button
                                 className="expanded-add-exercise-fab"
@@ -3290,17 +3470,69 @@ export default function Home() {
                                                         <tr className="record-detail-row workout-detail-row">
                                                             <td colSpan={7} style={{ padding: 0 }}>
                                                                 <div className="record-detail-panel workout-detail-panel" style={{ padding: 0, width: "min(100%, calc(100vw - 60px))" }}>
-                                                                    {isEditingWorkout && (
-                                                                        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "center", padding: "12px 12px 4px" }}>
-                                                                            <input className="detail-input" style={{ padding: "10px 12px" }} value={editWorkoutName} onChange={(event) => setEditWorkoutName(event.target.value)} aria-label="Workout name" />
+                                                                     {isEditingWorkout && (
+                                                                         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "center", padding: "12px 12px 4px" }}>
+                                                                             <input className="detail-input" style={{ padding: "10px 12px" }} value={editWorkoutName} onChange={(event) => setEditWorkoutName(event.target.value)} aria-label="Workout name" />
                                                                             <div className="row" style={{ gap: 8 }}>
                                                                                 <button className="bare-icon-btn" aria-label="Add exercise to workout" onClick={addEditWorkoutExercise}><Plus size={17} /></button>
                                                                                 <button className="bare-icon-btn" aria-label="Cancel editing workout" onClick={cancelEditWorkout}><X size={17} /></button>
                                                                                 <button className="bare-icon-btn" aria-label="Save workout changes" onClick={() => saveEditWorkout(workout)}><Check size={17} /></button>
-                                                                            </div>
-                                                                        </div>
-                                                                    )}
-                                                                    {(isEditingWorkout ? editWorkoutExercises.length : exercises.length) ? (
+                                                                             </div>
+                                                                         </div>
+                                                                     )}
+                                                                     {isEditingWorkout && (
+                                                                         <div className="edit-workout-details-panel inline-edit-workout-details-panel">
+                                                                             <label className="field-label">
+                                                                                 <span>Description</span>
+                                                                                 <textarea className="input finish-description-input" rows={4} value={editWorkoutNotes} onChange={(event) => setEditWorkoutNotes(event.target.value)} placeholder="Add workout description..." />
+                                                                             </label>
+                                                                             {editWorkoutPhotoUrls.length > 0 && (
+                                                                                 <div className="field-label">
+                                                                                     <span>Images</span>
+                                                                                     <label className="finish-photo-picker edit-workout-photo-picker">
+                                                                                         <input type="file" accept="image/*" multiple onChange={(event) => { const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/")); setEditWorkoutPhotos((current) => [...current, ...files]); event.target.value = ""; }} />
+                                                                                         <Plus size={18} />
+                                                                                         <span>Add images</span>
+                                                                                     </label>
+                                                                                     <div className="workout-photo-grid edit-workout-photo-grid">
+                                                                                         {editWorkoutPhotoUrls.map((url, index) => (
+                                                                                             <div className="edit-workout-photo" key={`${workout.id}-inline-edit-photo-${index}`}>
+                                                                                                 <button className="edit-workout-photo-open" type="button" aria-label="View image" onClick={() => setPreviewImageUrl(url)}><img src={url} alt="" /></button>
+                                                                                                 <button className="edit-workout-photo-remove" type="button" aria-label="Remove image" onClick={() => setEditWorkoutPhotoUrls((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
+                                                                                             </div>
+                                                                                         ))}
+                                                                                         {editWorkoutPhotoPreviews.map((preview, index) => (
+                                                                                             <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
+                                                                                                 <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                                                                 <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
+                                                                                             </div>
+                                                                                         ))}
+                                                                                     </div>
+                                                                                 </div>
+                                                                             )}
+                                                                             {!editWorkoutPhotoUrls.length && (
+                                                                                 <div className="field-label">
+                                                                                     <span>Images</span>
+                                                                                     <label className="finish-photo-picker edit-workout-photo-picker">
+                                                                                         <input type="file" accept="image/*" multiple onChange={(event) => { const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/")); setEditWorkoutPhotos((current) => [...current, ...files]); event.target.value = ""; }} />
+                                                                                         <Plus size={18} />
+                                                                                         <span>Add images</span>
+                                                                                     </label>
+                                                                                     {editWorkoutPhotoPreviews.length > 0 && (
+                                                                                         <div className="workout-photo-grid edit-workout-photo-grid">
+                                                                                             {editWorkoutPhotoPreviews.map((preview, index) => (
+                                                                                                 <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
+                                                                                                     <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                                                                     <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
+                                                                                                 </div>
+                                                                                             ))}
+                                                                                         </div>
+                                                                                     )}
+                                                                                 </div>
+                                                                             )}
+                                                                         </div>
+                                                                     )}
+                                                                     {(isEditingWorkout ? editWorkoutExercises.length : exercises.length) ? (
                                                                         <div
                                                                             className="recent-record-list"
                                                                             style={{
@@ -3810,7 +4042,7 @@ export default function Home() {
                                 {REST_TIMER_OPTIONS.map((seconds) => {
                                     const selectedExercise = workoutQueue.find((exercise) => exercise.id === restTimerExerciseId);
                                     return (
-                                    <button className={(selectedExercise?.restTimerSeconds ?? 0) === seconds ? "active" : ""} type="button" key={seconds} onClick={() => { setWorkoutQueue((current) => current.map((exercise) => exercise.id === restTimerExerciseId ? { ...exercise, restTimerSeconds: seconds } : exercise)); if (!seconds) { setRestTimerRemaining(0); setRestTimerTotal(0); } setRestTimerSheetOpen(false); }}>
+                                    <button className={(selectedExercise?.restTimerSeconds ?? 0) === seconds ? "active" : ""} type="button" key={seconds} onClick={() => { setWorkoutQueue((current) => current.map((exercise) => exercise.id === restTimerExerciseId ? { ...exercise, restTimerSeconds: seconds } : exercise)); if (!seconds) { setRestTimerRemaining(0); setRestTimerTotal(0); setRestTimerEndAt(0); } setRestTimerSheetOpen(false); }}>
                                         {formatRestOption(seconds)}
                                     </button>
                                     );
@@ -4012,7 +4244,19 @@ export default function Home() {
                             </div>
                         )}
                         <div className="exercise-picker-list" onTouchStartCapture={blurActiveInput} onPointerDownCapture={blurActiveInput} onTouchMoveCapture={blurActiveInput} onWheel={blurActiveInput} onScroll={blurActiveInput}>
-                            {exercisePickerSearch.trim().length < 2 ? <p className="muted">Start typing to find an exercise.</p> : exercisePickerSuggestions.length ? exercisePickerSuggestions.map((exercise) => {
+                            {exercisePickerSearch.trim().length < 2 ? <p className="muted">Start typing to find an exercise.</p> : (
+                                <>
+                                    {!exercisePickerSuggestions.some((exercise) => normalise(exercise.name) === normalise(exercisePickerSearch)) && (
+                                        <button
+                                            className="exercise-picker-item"
+                                            type="button"
+                                            onClick={() => { setExercisePickerOpen(false); openCustomExerciseModal(exercisePickerSearch, exercisePickerMode === "edit" ? "edit" : exercisePickerMode === "routine" ? "routine" : exercisePickerMode === "routine-edit" ? "routine-edit" : "tracker"); }}
+                                        >
+                                            <span className="exercise-suggestion-icon"><Plus size={17} /></span>
+                                            <span className="exercise-suggestion-copy"><span>Add custom exercise</span><small>{exercisePickerSearch.trim()}</small></span>
+                                        </button>
+                                    )}
+                                    {exercisePickerSuggestions.length ? exercisePickerSuggestions.map((exercise) => {
                                 const selected = selectedPickerExercises.some((item) => normalise(item.name) === normalise(exercise.name));
                                 const alreadyAdded = exercisePickerMode === "track"
                                     ? workoutQueue.some((item) => normalise(item.name) === normalise(exercise.name))
@@ -4033,7 +4277,9 @@ export default function Home() {
                                         {selected && <Check size={17} />}
                                     </button>
                                 );
-                            }) : <p className="muted">No exercises found.</p>}
+                                    }) : <p className="muted">No exercises found.</p>}
+                                </>
+                            )}
                         </div>
                         <div className="dialog-actions exercise-picker-actions">
                             <button className="btn secondary" type="button" onClick={() => setExercisePickerOpen(false)}>Cancel</button>
@@ -4058,7 +4304,7 @@ export default function Home() {
                                 <Select.Icon asChild><ChevronDown size={18} /></Select.Icon>
                             </Select.Trigger>
                             <Select.Portal>
-                                <Select.Content position="popper" sideOffset={6} style={{ zIndex: 40, minWidth: "var(--radix-select-trigger-width)", overflow: "hidden", border: "1px solid var(--line)", borderRadius: 16, background: "var(--panel)", color: "var(--text)", boxShadow: "0 14px 32px rgba(43,43,43,.16)" }}>
+                                <Select.Content position="popper" sideOffset={6} style={{ zIndex: 120, minWidth: "var(--radix-select-trigger-width)", overflow: "hidden", border: "1px solid var(--line)", borderRadius: 16, background: "var(--panel)", color: "var(--text)", boxShadow: "0 14px 32px rgba(43,43,43,.16)" }}>
                                     <Select.Viewport>
                                         {CUSTOM_EXERCISE_CATEGORIES.map((category) => (
                                             <Select.Item value={category} key={category} style={{ display: "grid", gridTemplateColumns: "20px 1fr", gap: 8, alignItems: "center", padding: "11px 12px", cursor: "pointer", outline: "none" }}>
@@ -4109,6 +4355,65 @@ export default function Home() {
                 </Dialog.Portal>
             </Dialog.Root>
 
+            <Dialog.Root open={finishDetailsModalOpen} onOpenChange={(open) => { if (!saving) { setFinishDetailsModalOpen(open); if (!open) setFinishSummary(null); } }}>
+                <Dialog.Portal>
+                    <Dialog.Overlay className="dialog-overlay" />
+                    <Dialog.Content className="dialog-content finish-details-dialog">
+                        <Dialog.Title className="dialog-title">Finish workout</Dialog.Title>
+                        <Dialog.Description className="dialog-description">Review your workout and add details before saving.</Dialog.Description>
+                        <div className="finish-details-body">
+                            <div className="finish-summary-grid">
+                                <span><small>Duration</small><strong>{workoutDurationLabel}</strong></span>
+                                <span><small>Volume</small><strong>{workoutStatsVolume} lbs</strong></span>
+                                <span><small>Sets</small><strong>{workoutStatsSetCount}</strong></span>
+                                <span><small>Exercises</small><strong>{workoutQueue.filter((exercise) => exercise.name.trim() && validSetRows(exercise.sets, exerciseIsBodyweight(exercise.name, exercise.equipment)).length).length}</strong></span>
+                            </div>
+                            <label className="field-label">
+                                <span>Workout name</span>
+                                <input className="input" value={finishWorkoutNameInput} onChange={(event) => setFinishWorkoutNameInput(event.target.value)} placeholder={formatWorkoutName()} />
+                            </label>
+                            <label className="field-label">
+                                <span>Description</span>
+                                <textarea className="input finish-description-input" rows={4} value={finishWorkoutNotes} onChange={(event) => setFinishWorkoutNotes(event.target.value)} placeholder="How did it feel? Add notes, PRs, soreness, or context." />
+                            </label>
+                            <div className="field-label">
+                                <span>Images</span>
+                                <label className="finish-photo-picker">
+                                    <input type="file" accept="image/*" multiple onChange={(event) => { const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("image/")); setFinishWorkoutPhotos((current) => [...current, ...files]); event.target.value = ""; }} />
+                                    <Plus size={18} />
+                                    <span>Add images</span>
+                                </label>
+                                {finishWorkoutPhotoPreviews.length > 0 && (
+                                    <div className="finish-photo-grid">
+                                        {finishWorkoutPhotoPreviews.map((preview, index) => (
+                                            <div className="finish-photo-preview" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
+                                                <img src={preview.url} alt="" />
+                                                <button type="button" aria-label="Remove image" onClick={() => setFinishWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                        <div className="dialog-actions finish-details-actions">
+                            <button className="btn secondary" type="button" disabled={saving} onClick={() => setFinishDetailsModalOpen(false)}>Cancel</button>
+                            <button className="btn" type="button" disabled={saving} onClick={() => finishWorkout({ title: finishWorkoutNameInput, notes: finishWorkoutNotes, photos: finishWorkoutPhotos })}>{saving ? "Saving..." : "Save workout"}</button>
+                        </div>
+                    </Dialog.Content>
+                </Dialog.Portal>
+            </Dialog.Root>
+
+            <Dialog.Root open={Boolean(previewImageUrl)} onOpenChange={(open) => !open && setPreviewImageUrl("")}>
+                <Dialog.Portal>
+                    <Dialog.Overlay className="dialog-overlay image-preview-overlay" />
+                    <Dialog.Content className="image-preview-dialog">
+                        <Dialog.Title className="sr-only">Workout image</Dialog.Title>
+                        <button className="image-preview-close" type="button" aria-label="Close image" onClick={() => setPreviewImageUrl("")}><X size={20} /></button>
+                        {previewImageUrl && <img src={previewImageUrl} alt="" />}
+                    </Dialog.Content>
+                </Dialog.Portal>
+            </Dialog.Root>
+
             <Dialog.Root open={Boolean(pendingDeleteWorkout)} onOpenChange={(open) => !open && setPendingDeleteWorkout(null)}>
                 <Dialog.Portal>
                     <Dialog.Overlay className="dialog-overlay" />
@@ -4125,7 +4430,7 @@ export default function Home() {
                 </Dialog.Portal>
             </Dialog.Root>
 
-            <Dialog.Root open={Boolean(finishSummary)} onOpenChange={(open) => !open && setFinishSummary(null)}>
+            <Dialog.Root open={Boolean(finishSummary) && !finishDetailsModalOpen} onOpenChange={(open) => !open && setFinishSummary(null)}>
                 <Dialog.Portal>
                     <Dialog.Overlay className="dialog-overlay" />
                     <Dialog.Content className="dialog-content finish-summary-dialog">
