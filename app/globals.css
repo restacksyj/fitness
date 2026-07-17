@@ -82,14 +82,14 @@ h3 {
 main {
   width: min(980px, 100%);
   margin: 0 auto;
-  padding: 18px 14px 90px;
+  padding: calc(18px + env(safe-area-inset-top)) 14px calc(90px + env(safe-area-inset-bottom));
 }
 .hero {
   position: sticky;
   top: 0;
   z-index: 5;
-  margin: -18px -14px 16px;
-  padding: 18px 14px 14px;
+  margin: calc(-18px - env(safe-area-inset-top)) -14px 16px;
+  padding: calc(18px + env(safe-area-inset-top)) 14px 14px;
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--line);
@@ -2570,13 +2570,13 @@ main {
     font-size: 16px !important;
   }
   main {
-    padding-bottom: 64px;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom));
   }
   .top-nav {
     position: fixed;
     left: 10px;
     right: 10px;
-    bottom: 0;
+    bottom: max(10px, env(safe-area-inset-bottom));
     z-index: 20;
     display: grid !important;
     grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
@@ -2620,7 +2620,7 @@ main {
     padding-bottom: calc(76px + env(safe-area-inset-bottom));
   }
   .top-nav {
-    bottom: calc(max(6px, env(safe-area-inset-bottom)) + 18px) !important;
+    bottom: max(10px, env(safe-area-inset-bottom)) !important;
     padding: 4px 6px !important;
   }
   .top-nav button {

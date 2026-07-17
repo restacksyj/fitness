@@ -1,6 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { Capacitor } from "@capacitor/core";
+import { LocalNotifications } from "@capacitor/local-notifications";
+import { StatusBar, Style as StatusBarStyle } from "@capacitor/status-bar";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
 import { format } from "date-fns";
@@ -60,6 +63,7 @@ const TOAST_DURATION_MS = 1500;
 const SWIPE_DELETE_WIDTH = 88;
 const PULL_REFRESH_THRESHOLD = 82;
 const REST_TIMER_OPTIONS = [0, 10, 20, 30, 45, 60, 90, 120, 180] as const;
+const WORKOUT_INACTIVITY_REMINDER_SECONDS = 10 * 60;
 type ActiveSection = "workouts" | "exercises" | "progress" | "weight" | "settings";
 type WorkoutUiState = { active: boolean; expanded: boolean; startedAt: number };
 const MUSCLE_GROUPS = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core"] as const;
@@ -351,11 +355,20 @@ export default function Home() {
     const weightInputRef = useRef<HTMLInputElement | null>(null);
     const skipInitialSectionPersistRef = useRef(true);
     const restTimerCompletedRef = useRef(false);
+    const restTimerNotificationIdRef = useRef(41045);
+    const workoutInactivityNotificationIdRef = useRef(41046);
 
     useEffect(() => {
         const saved = localStorage.getItem(SECTION_STORAGE_KEY);
         if (saved === "workouts" || saved === "exercises" || saved === "progress" || saved === "weight" || saved === "settings") setActiveSection(saved);
     }, []);
+
+    useEffect(() => {
+        if (!Capacitor.isNativePlatform()) return;
+        StatusBar.setOverlaysWebView({ overlay: false }).catch(() => undefined);
+        StatusBar.setStyle({ style: theme === "dark" ? StatusBarStyle.Dark : StatusBarStyle.Light }).catch(() => undefined);
+        StatusBar.setBackgroundColor({ color: theme === "dark" ? "#111111" : "#ffffff" }).catch(() => undefined);
+    }, [theme]);
 
     useEffect(() => {
         if (!restTimerEndAt) return;
@@ -1540,10 +1553,89 @@ export default function Home() {
         }
     }
 
+    async function ensureNativeRestTimerPermission() {
+        if (!Capacitor.isNativePlatform()) return false;
+        try {
+            const current = await LocalNotifications.checkPermissions();
+            if (current.display === "granted") return true;
+            const requested = await LocalNotifications.requestPermissions();
+            return requested.display === "granted";
+        } catch {
+            return false;
+        }
+    }
+
+    async function cancelNativeRestTimerNotification() {
+        if (!Capacitor.isNativePlatform()) return;
+        try {
+            await LocalNotifications.cancel({ notifications: [{ id: restTimerNotificationIdRef.current }] });
+        } catch {
+            // Native notifications are best-effort; the in-app timer still owns state.
+        }
+    }
+
+    async function scheduleNativeRestTimerNotification(seconds: number) {
+        if (!seconds || !Capacitor.isNativePlatform()) return;
+        const allowed = await ensureNativeRestTimerPermission();
+        if (!allowed) return;
+        try {
+            await cancelNativeRestTimerNotification();
+            await LocalNotifications.schedule({
+                notifications: [{
+                    id: restTimerNotificationIdRef.current,
+                    title: "Rest timer complete",
+                    body: "Time for your next set.",
+                    schedule: { at: new Date(Date.now() + seconds * 1000) },
+                    sound: "default",
+                    smallIcon: "ic_stat_icon_config_sample",
+                    iconColor: "#2563eb",
+                }],
+            });
+        } catch {
+            // Some native targets require platform assets before notification icons/sounds work.
+        }
+    }
+
+    async function cancelWorkoutInactivityReminder() {
+        if (!Capacitor.isNativePlatform()) return;
+        try {
+            await LocalNotifications.cancel({ notifications: [{ id: workoutInactivityNotificationIdRef.current }] });
+        } catch {
+            // Inactivity reminders are best-effort native notifications.
+        }
+    }
+
+    async function scheduleWorkoutInactivityReminder() {
+        if (!Capacitor.isNativePlatform()) return;
+        const allowed = await ensureNativeRestTimerPermission();
+        if (!allowed) return;
+        try {
+            await cancelWorkoutInactivityReminder();
+            await LocalNotifications.schedule({
+                notifications: [{
+                    id: workoutInactivityNotificationIdRef.current,
+                    title: "Still working out?",
+                    body: "It has been 10 minutes since your last workout activity.",
+                    schedule: { at: new Date(Date.now() + WORKOUT_INACTIVITY_REMINDER_SECONDS * 1000) },
+                    sound: "default",
+                    smallIcon: "ic_stat_icon_config_sample",
+                    iconColor: "#2563eb",
+                }],
+            });
+        } catch {
+            // If scheduling fails, normal workout tracking should continue unaffected.
+        }
+    }
+
+    function markWorkoutActivity() {
+        scheduleWorkoutInactivityReminder();
+    }
+
     function startRestTimer(seconds: number) {
         if (!seconds) return;
         restAudioContext();
         requestRestTimerNotificationPermission();
+        scheduleNativeRestTimerNotification(seconds);
         restTimerCompletedRef.current = false;
         setRestTimerMinimized(false);
         setRestTimerTotal(seconds);
@@ -1555,6 +1647,8 @@ export default function Home() {
         setRestTimerRemaining((remaining) => {
             const next = Math.max(0, remaining - 15);
             setRestTimerEndAt(next ? Date.now() + next * 1000 : 0);
+            if (next) scheduleNativeRestTimerNotification(next);
+            else cancelNativeRestTimerNotification();
             return next;
         });
     }
@@ -1564,12 +1658,14 @@ export default function Home() {
             const next = Math.max(1, remaining + 15);
             setRestTimerTotal((total) => Math.max(total, next));
             setRestTimerEndAt(Date.now() + next * 1000);
+            scheduleNativeRestTimerNotification(next);
             return next;
         });
     }
 
     function skipRestTimer() {
         restTimerCompletedRef.current = true;
+        cancelNativeRestTimerNotification();
         setRestTimerRemaining(0);
         setRestTimerTotal(0);
         setRestTimerEndAt(0);
@@ -1615,6 +1711,7 @@ export default function Home() {
     }
 
     function clearCurrentDraft() {
+        cancelWorkoutInactivityReminder();
         const keepTrackingOpen = Boolean(fullscreenExerciseId);
         setWorkoutQueue([]);
         setCollapsedQueueIds([]);
@@ -1649,6 +1746,7 @@ export default function Home() {
     }
 
     function confirmDiscardAndContinue() {
+        cancelWorkoutInactivityReminder();
         const action = pendingDiscardAction;
         setWorkoutQueue([]);
         setCollapsedQueueIds([]);
@@ -1695,6 +1793,7 @@ export default function Home() {
 
         const id = crypto.randomUUID();
         setDraftWorkoutActive(true);
+        markWorkoutActivity();
         setWorkoutQueue((prev) => [
             ...prev,
             {
@@ -1789,6 +1888,7 @@ export default function Home() {
             restTimerSeconds: 0,
         }));
         setDraftWorkoutActive(true);
+        markWorkoutActivity();
         setWorkoutQueue((prev) => [...prev, ...drafts]);
         setCollapsedQueueIds((prev) => fullscreenExerciseId ? prev.filter((id) => !drafts.some((draft) => draft.id === id)) : [...prev, ...drafts.slice(1).map((draft) => draft.id)]);
         if (fullscreenExerciseId) setFullscreenExerciseId(drafts[0].id);
@@ -2267,6 +2367,7 @@ export default function Home() {
         setSavedWorkoutName("");
         setCurrentWorkoutId("");
         setWorkoutQueue(drafts);
+        markWorkoutActivity();
         setCollapsedQueueIds([]);
         setDraftWorkoutActive(true);
         setFullscreenExerciseId(drafts[0]?.id ?? "workout");
@@ -2482,10 +2583,12 @@ export default function Home() {
     }
 
     function updateQueuedExerciseNotes(exerciseId: string, notes: string) {
+        markWorkoutActivity();
         setWorkoutQueue((prev) => prev.map((exercise) => exercise.id === exerciseId ? { ...exercise, notes } : exercise));
     }
 
     function updateQueuedSet(exerciseId: string, setId: string, patch: Partial<Omit<SetRow, "id">>) {
+        markWorkoutActivity();
         setWorkoutQueue((prev) =>
             prev.map((exercise) =>
                 exercise.id === exerciseId
@@ -2496,6 +2599,7 @@ export default function Home() {
     }
 
     function toggleQueuedSetCompleted(exerciseId: string, setId: string, completed: boolean, restSeconds: number) {
+        markWorkoutActivity();
         setWorkoutQueue((prev) => prev.map((exercise) => {
             if (exercise.id !== exerciseId) return exercise;
             const isBodyweight = exerciseIsBodyweight(exercise.name, exercise.equipment);
@@ -2519,6 +2623,7 @@ export default function Home() {
     }
 
     function addQueuedSet(exerciseId: string) {
+        markWorkoutActivity();
         setWorkoutQueue((prev) => prev.map((exercise) => {
             if (exercise.id !== exerciseId) return exercise;
             const nextSet = trackerSetFromPreviousBest(exercise.name, exercise.sets.length + 1);
@@ -2527,12 +2632,15 @@ export default function Home() {
     }
 
     function removeQueuedSet(exerciseId: string, setId: string) {
+        markWorkoutActivity();
         setWorkoutQueue((prev) => prev.map((exercise) => exercise.id === exerciseId ? { ...exercise, sets: exercise.sets.filter((set) => set.id !== setId) } : exercise));
         setOpenSwipeSet((current) => current?.exerciseId === exerciseId && current.setId === setId ? null : current);
     }
 
     function removeQueuedExercise(exercise: ExerciseDraft) {
         const nextQueue = workoutQueue.filter((item) => item.id !== exercise.id);
+        if (nextQueue.length) markWorkoutActivity();
+        else cancelWorkoutInactivityReminder();
         setWorkoutQueue(nextQueue);
         setCollapsedQueueIds((prev) => prev.filter((collapsedId) => collapsedId !== exercise.id));
         setFullscreenExerciseId((id) => !id ? id : id === exercise.id ? nextQueue[0]?.id ?? "workout" : id);
@@ -2556,6 +2664,7 @@ export default function Home() {
             setWorkoutClockTick(now);
         }
         setDraftWorkoutActive(true);
+        markWorkoutActivity();
         setFullscreenExerciseId("workout");
     }
 
@@ -2591,6 +2700,7 @@ export default function Home() {
         }
         setSaving(false);
         setFinishDetailsModalOpen(false);
+        cancelWorkoutInactivityReminder();
 
         setFinishSummary(null);
         setWorkoutQueue([]);
@@ -4042,7 +4152,7 @@ export default function Home() {
                                 {REST_TIMER_OPTIONS.map((seconds) => {
                                     const selectedExercise = workoutQueue.find((exercise) => exercise.id === restTimerExerciseId);
                                     return (
-                                    <button className={(selectedExercise?.restTimerSeconds ?? 0) === seconds ? "active" : ""} type="button" key={seconds} onClick={() => { setWorkoutQueue((current) => current.map((exercise) => exercise.id === restTimerExerciseId ? { ...exercise, restTimerSeconds: seconds } : exercise)); if (!seconds) { setRestTimerRemaining(0); setRestTimerTotal(0); setRestTimerEndAt(0); } setRestTimerSheetOpen(false); }}>
+                                    <button className={(selectedExercise?.restTimerSeconds ?? 0) === seconds ? "active" : ""} type="button" key={seconds} onClick={() => { setWorkoutQueue((current) => current.map((exercise) => exercise.id === restTimerExerciseId ? { ...exercise, restTimerSeconds: seconds } : exercise)); if (!seconds) { cancelNativeRestTimerNotification(); setRestTimerRemaining(0); setRestTimerTotal(0); setRestTimerEndAt(0); } setRestTimerSheetOpen(false); }}>
                                         {formatRestOption(seconds)}
                                     </button>
                                     );

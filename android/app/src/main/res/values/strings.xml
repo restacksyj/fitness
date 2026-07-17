@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ProgressFit</string>
+    <string name="title_activity_main">ProgressFit</string>
+    <string name="package_name">com.progressfit.app</string>
+    <string name="custom_url_scheme">com.progressfit.app</string>
+</resources>

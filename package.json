@@ -2,12 +2,21 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:cap": "CAPACITOR_EXPORT=1 next build",
+    "cap:add:ios": "cap add ios",
+    "cap:add:android": "cap add android",
+    "cap:sync": "bun run build:cap && cap sync",
+    "cap:open:ios": "cap open ios",
+    "cap:open:android": "cap open android",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "import:wger": "bun scripts/import-wger-exercises.ts"
   },
   "dependencies": {
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/local-notifications": "^8.2.1",
+    "@capacitor/status-bar": "^8.0.3",
     "@radix-ui/react-dialog": "^1.1.17",
     "@radix-ui/react-select": "^2.3.1",
     "@supabase/supabase-js": "latest",
@@ -24,6 +33,9 @@
     "recharts": "latest"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.4.2",
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/ios": "^8.4.2",
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
