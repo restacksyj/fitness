@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, registerPlugin } from "@capacitor/core";
+import { Keyboard, KeyboardResize } from "@capacitor/keyboard";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { StatusBar, Style as StatusBarStyle } from "@capacitor/status-bar";
+import { LiveActivity } from "capacitor-live-activity";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
 import { format } from "date-fns";
@@ -11,7 +13,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent, type TouchEvent } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Bot, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Dumbbell, Edit3, Eraser, LogIn, LogOut, Maximize2, Minimize2, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
+import { Activity, Bell, Bot, Calendar, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Dumbbell, Edit3, Eraser, LogIn, LogOut, Maximize2, Minimize2, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
 import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
 import { isSupabaseConfigured, supabase, type BodyWeight, type CustomExercise, type ExerciseCatalogItem, type Routine, type RoutineExercise, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
@@ -47,8 +49,8 @@ type EditableWorkoutExercise = { id: string; name: string; notes: string; setRow
 type RoutineBuilderDraft = { open: boolean; editingRoutineId: string; title: string; exercises: EditableWorkoutExercise[]; expandedIds: string[] };
 type OfflineWorkoutPayload = { name: string; notes?: string | null; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
 type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on: string; notes: string | null };
-
 const TRACKER_DRAFT_KEY = "progressfit-exercise-tracker-draft";
+const NOTIFICATIONS_ENABLED_KEY = "progressfit-notifications-enabled";
 const WORKOUT_UI_STATE_KEY = "progressfit-workout-ui-state";
 const ROUTINE_BUILDER_DRAFT_KEY = "progressfit-routine-builder-draft";
 const formatWorkoutName = (date = new Date()) => date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
@@ -63,8 +65,15 @@ const TOAST_DURATION_MS = 1500;
 const SWIPE_DELETE_WIDTH = 88;
 const PULL_REFRESH_THRESHOLD = 82;
 const REST_TIMER_OPTIONS = [0, 10, 20, 30, 45, 60, 90, 120, 180] as const;
+const REST_TIMER_LIVE_ACTIVITY_ID = "rest-timer";
 const WORKOUT_INACTIVITY_REMINDER_SECONDS = 10 * 60;
 type ActiveSection = "workouts" | "exercises" | "progress" | "weight" | "settings";
+type PermissionState = "granted" | "denied" | "prompt" | "unavailable";
+const AppSettings = registerPlugin<{
+    openSettings: () => Promise<void>;
+    cameraStatus: () => Promise<{ status: PermissionState }>;
+    requestCamera: () => Promise<{ status: PermissionState }>;
+}>("AppSettings");
 type WorkoutUiState = { active: boolean; expanded: boolean; startedAt: number };
 const MUSCLE_GROUPS = ["Chest", "Back", "Legs", "Shoulders", "Arms", "Core"] as const;
 const CUSTOM_EXERCISE_CATEGORIES = ["Arms", "Back", "Chest", "Core", "Legs", "Shoulders", "Cardio", "Full Body", "Other"] as const;
@@ -172,6 +181,15 @@ function inputDateToDate(value: string) {
 
 function dateToInputValue(date?: Date) {
     return date ? format(date, "yyyy-MM-dd") : "";
+}
+
+function calendarCellsForMonth(year: number, month: number) {
+    const leading = new Date(year, month, 1).getDay();
+    const days = new Date(year, month + 1, 0).getDate();
+    const cells: Array<Date | null> = Array.from({ length: leading }, () => null);
+    for (let day = 1; day <= days; day += 1) cells.push(new Date(year, month, day));
+    while (cells.length % 7) cells.push(null);
+    return cells;
 }
 
 function DatePickerField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
@@ -293,7 +311,7 @@ export default function Home() {
     const [editWorkoutNotes, setEditWorkoutNotes] = useState("");
     const [editWorkoutPhotoUrls, setEditWorkoutPhotoUrls] = useState<string[]>([]);
     const [editWorkoutPhotos, setEditWorkoutPhotos] = useState<File[]>([]);
-    const [previewImageUrl, setPreviewImageUrl] = useState("");
+    const [imagePreview, setImagePreview] = useState<{ urls: string[]; index: number } | null>(null);
     const [editWorkoutExercises, setEditWorkoutExercises] = useState<EditableWorkoutExercise[]>([]);
     const [weightValue, setWeightValue] = useState("");
     const [weightDate, setWeightDate] = useState(todayInputValue());
@@ -317,6 +335,16 @@ export default function Home() {
     const [pendingDeleteWorkout, setPendingDeleteWorkout] = useState<WorkoutWithExercises | null>(null);
     const [pendingRemoveExercise, setPendingRemoveExercise] = useState<ExerciseDraft | null>(null);
     const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+    const [permissionsModalOpen, setPermissionsModalOpen] = useState(false);
+    const [trainingCalendarOpen, setTrainingCalendarOpen] = useState(false);
+    const [trainingCalendarView, setTrainingCalendarView] = useState<"month" | "year">("month");
+    const [trainingCalendarMonth, setTrainingCalendarMonth] = useState(() => new Date());
+    const [selectedTrainingDate, setSelectedTrainingDate] = useState(todayInputValue());
+    const [calendarWorkoutId, setCalendarWorkoutId] = useState("");
+    const [calendarExpandedExerciseIds, setCalendarExpandedExerciseIds] = useState<string[]>([]);
+    const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+    const [notificationPermission, setNotificationPermission] = useState<PermissionState>("prompt");
+    const [cameraPermission, setCameraPermission] = useState<PermissionState>("prompt");
     const [expandedWorkoutIds, setExpandedWorkoutIds] = useState<string[]>([]);
     const [expandedWorkoutExerciseIds, setExpandedWorkoutExerciseIds] = useState<string[]>([]);
     const [isExerciseSearchFocused, setIsExerciseSearchFocused] = useState(false);
@@ -357,6 +385,12 @@ export default function Home() {
     const restTimerCompletedRef = useRef(false);
     const restTimerNotificationIdRef = useRef(41045);
     const workoutInactivityNotificationIdRef = useRef(41046);
+    const restTimerLiveActivityExerciseRef = useRef("Rest timer");
+
+    function showToast(message: string) {
+        setToast(message);
+        window.setTimeout(() => setToast(""), TOAST_DURATION_MS);
+    }
 
     useEffect(() => {
         const saved = localStorage.getItem(SECTION_STORAGE_KEY);
@@ -364,11 +398,42 @@ export default function Home() {
     }, []);
 
     useEffect(() => {
+        setNotificationsEnabled(localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) !== "false");
+    }, []);
+
+    useEffect(() => {
+        if (!permissionsModalOpen) return;
+        const refresh = () => void refreshPermissionStatuses();
+        window.addEventListener("focus", refresh);
+        return () => window.removeEventListener("focus", refresh);
+    }, [permissionsModalOpen]);
+
+    useEffect(() => {
+        if (!trainingCalendarOpen || trainingCalendarView !== "month") return;
+        window.requestAnimationFrame(() => {
+            document.querySelector<HTMLElement>(`[data-calendar-month="${format(trainingCalendarMonth, "yyyy-MM")}"]`)?.scrollIntoView({ block: "start" });
+        });
+    }, [trainingCalendarMonth, trainingCalendarOpen, trainingCalendarView]);
+
+    useEffect(() => {
         if (!Capacitor.isNativePlatform()) return;
         StatusBar.setOverlaysWebView({ overlay: false }).catch(() => undefined);
         StatusBar.setStyle({ style: theme === "dark" ? StatusBarStyle.Dark : StatusBarStyle.Light }).catch(() => undefined);
         StatusBar.setBackgroundColor({ color: theme === "dark" ? "#111111" : "#ffffff" }).catch(() => undefined);
     }, [theme]);
+
+    useEffect(() => {
+        if (!Capacitor.isNativePlatform()) return;
+        LiveActivity.isAvailable()
+            .then((result) => {
+                console.info("Live Activity availability", result);
+                if (!result.value) showToast("Live Activities unavailable or disabled");
+            })
+            .catch((error) => {
+                console.warn("Live Activity plugin probe failed", error);
+                showToast("Live Activity plugin failed");
+            });
+    }, []);
 
     useEffect(() => {
         if (!restTimerEndAt) return;
@@ -388,6 +453,7 @@ export default function Home() {
         setRestTimerEndAt(0);
         playRestTimerSound();
         notifyRestTimerComplete();
+        updateRestTimerLiveActivity(0, true);
     }, [restTimerRemaining, restTimerTotal]);
 
     useEffect(() => {
@@ -408,8 +474,11 @@ export default function Home() {
 
     useEffect(() => {
         const updateViewportHeight = () => {
-            const height = window.visualViewport?.height ?? window.innerHeight;
+            const viewport = window.visualViewport;
+            const height = Math.round(viewport?.height ?? window.innerHeight);
+            const offsetTop = Math.round(viewport?.offsetTop ?? 0);
             document.documentElement.style.setProperty("--app-viewport-height", `${height}px`);
+            document.documentElement.style.setProperty("--app-viewport-offset-top", `${offsetTop}px`);
         };
         updateViewportHeight();
         window.visualViewport?.addEventListener("resize", updateViewportHeight);
@@ -421,6 +490,40 @@ export default function Home() {
             window.removeEventListener("resize", updateViewportHeight);
         };
     }, []);
+
+    useEffect(() => {
+        if (Capacitor.getPlatform() !== "ios") return;
+        const root = document.documentElement;
+        root.classList.add("native-keyboard-managed");
+        const showListener = Keyboard.addListener("keyboardWillShow", ({ keyboardHeight }) => {
+            root.classList.add("keyboard-visible");
+            root.style.setProperty("--keyboard-height", `${keyboardHeight}px`);
+        });
+        const hideListener = Keyboard.addListener("keyboardWillHide", () => {
+            root.classList.remove("keyboard-visible");
+            root.style.setProperty("--keyboard-height", "0px");
+        });
+        return () => {
+            root.classList.remove("native-keyboard-managed");
+            root.classList.remove("keyboard-visible");
+            root.style.removeProperty("--keyboard-height");
+            void showListener.then((listener) => listener.remove());
+            void hideListener.then((listener) => listener.remove());
+        };
+    }, []);
+
+    useEffect(() => {
+        if (Capacitor.getPlatform() !== "ios") return;
+        document.documentElement.style.setProperty("--keyboard-height", "0px");
+        void Keyboard.setResizeMode({ mode: finishDetailsModalOpen ? KeyboardResize.None : KeyboardResize.Native });
+    }, [finishDetailsModalOpen]);
+
+    function dismissFinishKeyboard(event: PointerEvent<HTMLElement>) {
+        const target = event.target as HTMLElement;
+        if (target.closest("input, textarea, select, label, button, a, [role='button']")) return;
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        if (Capacitor.getPlatform() === "ios") void Keyboard.hide();
+    }
 
     useEffect(() => {
         const trackerDraft = loadTrackerDraft();
@@ -607,6 +710,33 @@ export default function Home() {
 
     const finishWorkoutPhotoPreviews = useMemo(() => finishWorkoutPhotos.map((file) => ({ file, url: URL.createObjectURL(file) })), [finishWorkoutPhotos]);
     const editWorkoutPhotoPreviews = useMemo(() => editWorkoutPhotos.map((file) => ({ file, url: URL.createObjectURL(file) })), [editWorkoutPhotos]);
+    const editWorkoutPreviewUrls = useMemo(() => [...editWorkoutPhotoUrls, ...editWorkoutPhotoPreviews.map((preview) => preview.url)], [editWorkoutPhotoPreviews, editWorkoutPhotoUrls]);
+    const previewImageUrl = imagePreview?.urls[imagePreview.index] ?? "";
+    const imagePreviewTouchStartXRef = useRef<number | null>(null);
+
+    function openImagePreview(urls: string[], index: number) {
+        if (!urls.length) return;
+        setImagePreview({ urls, index: Math.max(0, Math.min(index, urls.length - 1)) });
+    }
+
+    function moveImagePreview(direction: -1 | 1) {
+        setImagePreview((current) => current && current.urls.length > 1
+            ? { ...current, index: (current.index + direction + current.urls.length) % current.urls.length }
+            : current);
+    }
+
+    function startImagePreviewSwipe(event: TouchEvent<HTMLElement>) {
+        imagePreviewTouchStartXRef.current = event.touches[0]?.clientX ?? null;
+    }
+
+    function endImagePreviewSwipe(event: TouchEvent<HTMLElement>) {
+        const startX = imagePreviewTouchStartXRef.current;
+        imagePreviewTouchStartXRef.current = null;
+        if (startX === null) return;
+        const distance = (event.changedTouches[0]?.clientX ?? startX) - startX;
+        if (Math.abs(distance) < 44) return;
+        moveImagePreview(distance < 0 ? 1 : -1);
+    }
 
     useEffect(() => {
         return () => finishWorkoutPhotoPreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
@@ -1309,6 +1439,31 @@ export default function Home() {
         });
     }, [recentWorkouts, workoutEndDate, workoutSearch, workoutStartDate]);
 
+    const workoutsByDate = useMemo(() => {
+        const grouped = new Map<string, WorkoutWithExercises[]>();
+        recentWorkouts.forEach((workout) => {
+            const key = format(new Date(workout.created_at), "yyyy-MM-dd");
+            grouped.set(key, [...(grouped.get(key) ?? []), workout]);
+        });
+        return grouped;
+    }, [recentWorkouts]);
+    const selectedCalendarWorkouts = workoutsByDate.get(selectedTrainingDate) ?? [];
+    const selectedCalendarWorkout = recentWorkouts.find((workout) => workout.id === calendarWorkoutId) ?? null;
+    const trainingCalendarYear = trainingCalendarMonth.getFullYear();
+    const currentCalendarDate = new Date();
+    const finalVisibleCalendarMonth = trainingCalendarYear < currentCalendarDate.getFullYear()
+        ? 11
+        : trainingCalendarYear === currentCalendarDate.getFullYear()
+            ? currentCalendarDate.getMonth()
+            : -1;
+    const trainingCalendarMonths = Array.from({ length: finalVisibleCalendarMonth + 1 }, (_, month) => {
+        const workouts = recentWorkouts.filter((workout) => {
+            const date = new Date(workout.created_at);
+            return date.getFullYear() === trainingCalendarYear && date.getMonth() === month;
+        });
+        return { month, workouts, cells: calendarCellsForMonth(trainingCalendarYear, month) };
+    });
+
     const workoutTotalPages = Math.max(1, Math.ceil(filteredWorkouts.length / PAGE_SIZE));
     const safeWorkoutPage = Math.min(workoutPage, workoutTotalPages - 1);
     const workoutRows = filteredWorkouts.slice(safeWorkoutPage * PAGE_SIZE, safeWorkoutPage * PAGE_SIZE + PAGE_SIZE);
@@ -1523,6 +1678,7 @@ export default function Home() {
     }
 
     async function requestRestTimerNotificationPermission() {
+        if (!notificationsEnabled) return;
         if (!("Notification" in window) || Notification.permission !== "default") return;
         try {
             await Notification.requestPermission();
@@ -1532,6 +1688,7 @@ export default function Home() {
     }
 
     async function notifyRestTimerComplete() {
+        if (!notificationsEnabled) return;
         if (!("Notification" in window) || Notification.permission !== "granted") return;
         try {
             navigator.vibrate?.([220, 100, 220]);
@@ -1554,6 +1711,7 @@ export default function Home() {
     }
 
     async function ensureNativeRestTimerPermission() {
+        if (!notificationsEnabled) return false;
         if (!Capacitor.isNativePlatform()) return false;
         try {
             const current = await LocalNotifications.checkPermissions();
@@ -1596,6 +1754,82 @@ export default function Home() {
         }
     }
 
+    async function startRestTimerLiveActivity(seconds: number, exerciseName: string) {
+        if (!seconds || !Capacitor.isNativePlatform()) return;
+        restTimerLiveActivityExerciseRef.current = exerciseName || "Rest timer";
+        const endAt = Date.now() + seconds * 1000;
+        try {
+            const available = await LiveActivity.isAvailable();
+            if (!available.value) {
+                console.warn("Rest timer Live Activity is not available on this device or is disabled in Settings.");
+                showToast("Live Activities unavailable or disabled");
+                return;
+            }
+        } catch (error) {
+            console.warn("Unable to check Live Activity availability.", error);
+            showToast("Live Activity plugin failed");
+            return;
+        }
+        try {
+            await LiveActivity.endActivity({
+                id: REST_TIMER_LIVE_ACTIVITY_ID,
+                contentState: restTimerLiveActivityState(0, restTimerLiveActivityExerciseRef.current, true),
+                dismissalPolicy: "immediate",
+            });
+        } catch {
+            // There may not be an existing Live Activity to replace.
+        }
+        try {
+            await LiveActivity.startActivity({
+                id: REST_TIMER_LIVE_ACTIVITY_ID,
+                attributes: { title: "Rest timer" },
+                contentState: restTimerLiveActivityState(endAt, restTimerLiveActivityExerciseRef.current),
+            });
+            const currentActivity = await LiveActivity.getCurrentActivity({ id: REST_TIMER_LIVE_ACTIVITY_ID });
+            console.info("Started rest timer Live Activity.", currentActivity);
+            showToast("Live Activity started");
+        } catch (error) {
+            console.warn("Failed to start rest timer Live Activity.", error);
+            showToast("Live Activity failed to start");
+            // Live Activities require iOS 16.1+, user support, and a valid widget extension.
+        }
+    }
+
+    async function updateRestTimerLiveActivity(seconds: number, isComplete = false) {
+        if (!Capacitor.isNativePlatform()) return;
+        try {
+            await LiveActivity.updateActivity({
+                id: REST_TIMER_LIVE_ACTIVITY_ID,
+                contentState: restTimerLiveActivityState(Date.now() + Math.max(0, seconds) * 1000, restTimerLiveActivityExerciseRef.current, isComplete),
+            });
+        } catch (error) {
+            console.warn("Failed to update rest timer Live Activity.", error);
+            // Keep the regular native notification path as the fallback.
+        }
+    }
+
+    async function endRestTimerLiveActivity(dismissImmediately = false) {
+        if (!Capacitor.isNativePlatform()) return;
+        try {
+            await LiveActivity.endActivity({
+                id: REST_TIMER_LIVE_ACTIVITY_ID,
+                contentState: restTimerLiveActivityState(0, restTimerLiveActivityExerciseRef.current, true),
+                dismissalPolicy: dismissImmediately ? "immediate" : "default",
+            });
+        } catch (error) {
+            console.warn("Failed to end rest timer Live Activity.", error);
+            // No active Live Activity or unsupported iOS version.
+        }
+    }
+
+    function restTimerLiveActivityState(endAt: number, exerciseName: string, isComplete = false) {
+        return {
+            endAt: String(endAt),
+            exerciseName,
+            isComplete: String(isComplete),
+        };
+    }
+
     async function cancelWorkoutInactivityReminder() {
         if (!Capacitor.isNativePlatform()) return;
         try {
@@ -1631,11 +1865,123 @@ export default function Home() {
         scheduleWorkoutInactivityReminder();
     }
 
-    function startRestTimer(seconds: number) {
+    async function refreshPermissionStatuses() {
+        if (Capacitor.isNativePlatform()) {
+            try {
+                const notificationStatus = await LocalNotifications.checkPermissions();
+                setNotificationPermission(notificationStatus.display === "granted" ? "granted" : notificationStatus.display === "denied" ? "denied" : "prompt");
+            } catch {
+                setNotificationPermission("unavailable");
+            }
+            if (Capacitor.getPlatform() === "ios") {
+                try {
+                    const result = await AppSettings.cameraStatus();
+                    setCameraPermission(result.status);
+                } catch {
+                    setCameraPermission("unavailable");
+                }
+            } else {
+                setCameraPermission("unavailable");
+            }
+            return;
+        }
+
+        setNotificationPermission("Notification" in window
+            ? Notification.permission === "default" ? "prompt" : Notification.permission
+            : "unavailable");
+        try {
+            const result = await navigator.permissions.query({ name: "camera" as PermissionName });
+            setCameraPermission(result.state === "granted" ? "granted" : result.state === "denied" ? "denied" : "prompt");
+        } catch {
+            setCameraPermission("unavailable");
+        }
+    }
+
+    async function openPermissionsMenu() {
+        setPermissionsModalOpen(true);
+        await refreshPermissionStatuses();
+    }
+
+    async function toggleNotificationsEnabled() {
+        const next = !notificationsEnabled;
+        setNotificationsEnabled(next);
+        localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, String(next));
+        if (!next) {
+            await Promise.all([cancelNativeRestTimerNotification(), cancelWorkoutInactivityReminder()]);
+            return;
+        }
+        if (Capacitor.isNativePlatform()) {
+            try {
+                const result = await LocalNotifications.requestPermissions();
+                setNotificationPermission(result.display === "granted" ? "granted" : "denied");
+            } catch {
+                setNotificationPermission("unavailable");
+            }
+        } else if ("Notification" in window) {
+            const result = await Notification.requestPermission();
+            setNotificationPermission(result === "default" ? "prompt" : result);
+        }
+    }
+
+    async function requestCameraAccess() {
+        if (Capacitor.getPlatform() !== "ios") return;
+        try {
+            const result = await AppSettings.requestCamera();
+            setCameraPermission(result.status);
+            if (result.status === "denied") showToast("Camera access is blocked in iOS Settings");
+        } catch {
+            setCameraPermission("unavailable");
+        }
+    }
+
+    async function openSystemSettings() {
+        if (Capacitor.getPlatform() !== "ios") return;
+        try {
+            await AppSettings.openSettings();
+        } catch {
+            showToast("Could not open iOS Settings");
+        }
+    }
+
+    function permissionLabel(permission: PermissionState) {
+        if (permission === "granted") return "Allowed";
+        if (permission === "denied") return "Blocked by system";
+        if (permission === "prompt") return "Not requested";
+        return "Unavailable";
+    }
+
+    function openTrainingCalendar() {
+        const latestWorkout = recentWorkouts[0];
+        const initialDate = latestWorkout ? new Date(latestWorkout.created_at) : new Date();
+        setTrainingCalendarMonth(initialDate);
+        setSelectedTrainingDate(format(initialDate, "yyyy-MM-dd"));
+        setCalendarWorkoutId("");
+        setTrainingCalendarOpen(true);
+    }
+
+    function selectTrainingCalendarDate(date: Date, showMonth = false) {
+        const key = format(date, "yyyy-MM-dd");
+        const workouts = workoutsByDate.get(key) ?? [];
+        setSelectedTrainingDate(key);
+        setTrainingCalendarMonth(date);
+        if (workouts.length === 1) {
+            openCalendarWorkout(workouts[0]);
+            return;
+        }
+        if (showMonth) setTrainingCalendarView("month");
+    }
+
+    function openCalendarWorkout(workout: WorkoutWithExercises) {
+        setCalendarExpandedExerciseIds([]);
+        setCalendarWorkoutId(workout.id);
+    }
+
+    function startRestTimer(seconds: number, exerciseName = "Rest timer") {
         if (!seconds) return;
         restAudioContext();
         requestRestTimerNotificationPermission();
         scheduleNativeRestTimerNotification(seconds);
+        startRestTimerLiveActivity(seconds, exerciseName);
         restTimerCompletedRef.current = false;
         setRestTimerMinimized(false);
         setRestTimerTotal(seconds);
@@ -1647,8 +1993,13 @@ export default function Home() {
         setRestTimerRemaining((remaining) => {
             const next = Math.max(0, remaining - 15);
             setRestTimerEndAt(next ? Date.now() + next * 1000 : 0);
-            if (next) scheduleNativeRestTimerNotification(next);
-            else cancelNativeRestTimerNotification();
+            if (next) {
+                scheduleNativeRestTimerNotification(next);
+                updateRestTimerLiveActivity(next);
+            } else {
+                cancelNativeRestTimerNotification();
+                updateRestTimerLiveActivity(0, true);
+            }
             return next;
         });
     }
@@ -1659,6 +2010,7 @@ export default function Home() {
             setRestTimerTotal((total) => Math.max(total, next));
             setRestTimerEndAt(Date.now() + next * 1000);
             scheduleNativeRestTimerNotification(next);
+            updateRestTimerLiveActivity(next);
             return next;
         });
     }
@@ -1666,6 +2018,7 @@ export default function Home() {
     function skipRestTimer() {
         restTimerCompletedRef.current = true;
         cancelNativeRestTimerNotification();
+        endRestTimerLiveActivity(true);
         setRestTimerRemaining(0);
         setRestTimerTotal(0);
         setRestTimerEndAt(0);
@@ -1712,6 +2065,7 @@ export default function Home() {
 
     function clearCurrentDraft() {
         cancelWorkoutInactivityReminder();
+        endRestTimerLiveActivity(true);
         const keepTrackingOpen = Boolean(fullscreenExerciseId);
         setWorkoutQueue([]);
         setCollapsedQueueIds([]);
@@ -1747,6 +2101,7 @@ export default function Home() {
 
     function confirmDiscardAndContinue() {
         cancelWorkoutInactivityReminder();
+        endRestTimerLiveActivity(true);
         const action = pendingDiscardAction;
         setWorkoutQueue([]);
         setCollapsedQueueIds([]);
@@ -2619,7 +2974,7 @@ export default function Home() {
                 }),
             };
         }));
-        if (completed) startRestTimer(restSeconds);
+        if (completed) startRestTimer(restSeconds, workoutQueue.find((exercise) => exercise.id === exerciseId)?.name ?? "Rest timer");
     }
 
     function addQueuedSet(exerciseId: string) {
@@ -2701,6 +3056,7 @@ export default function Home() {
         setSaving(false);
         setFinishDetailsModalOpen(false);
         cancelWorkoutInactivityReminder();
+        endRestTimerLiveActivity(true);
 
         setFinishSummary(null);
         setWorkoutQueue([]);
@@ -2954,7 +3310,7 @@ export default function Home() {
             <AnimatePresence>
                 {activeSection === "exercises" && fullscreenExerciseId && (
                     <motion.section
-                        className="card stack recent-card expanded-workout-section"
+                        className={`card stack recent-card expanded-workout-section${restTimerRemaining > 0 ? restTimerMinimized ? " has-minimized-rest-timer" : " has-rest-timer" : ""}`}
                         initial={{ opacity: 0, y: 32, scale: 0.985 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 32, scale: 0.985 }}
@@ -3185,7 +3541,7 @@ export default function Home() {
                     </div>
                     {fullscreenExerciseId && (
                         <motion.button
-                            className="expanded-add-exercise-fab"
+                            className={`expanded-add-exercise-fab${restTimerRemaining > 0 ? restTimerMinimized ? " above-minimized-rest-timer" : " above-rest-timer" : ""}`}
                             type="button"
                             aria-label="Add exercise"
                             onClick={() => openExercisePicker()}
@@ -3249,13 +3605,13 @@ export default function Home() {
                                             <div className="workout-photo-grid edit-workout-photo-grid">
                                                 {editWorkoutPhotoUrls.map((url, index) => (
                                                     <div className="edit-workout-photo" key={`${workout.id}-edit-photo-${index}`}>
-                                                        <button className="edit-workout-photo-open" type="button" aria-label="View image" onClick={() => setPreviewImageUrl(url)}><img src={url} alt="" /></button>
+                                                        <button className="edit-workout-photo-open" type="button" aria-label={`View image ${index + 1} of ${editWorkoutPreviewUrls.length}`} onClick={() => openImagePreview(editWorkoutPreviewUrls, index)}><img src={url} alt="" /></button>
                                                         <button className="edit-workout-photo-remove" type="button" aria-label="Remove image" onClick={() => setEditWorkoutPhotoUrls((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
                                                     </div>
                                                 ))}
                                                 {editWorkoutPhotoPreviews.map((preview, index) => (
                                                     <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
-                                                        <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                        <button className="edit-workout-photo-open" type="button" aria-label={`View image ${editWorkoutPhotoUrls.length + index + 1} of ${editWorkoutPreviewUrls.length}`} onClick={() => openImagePreview(editWorkoutPreviewUrls, editWorkoutPhotoUrls.length + index)}><img src={preview.url} alt="" /></button>
                                                         <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
                                                     </div>
                                                 ))}
@@ -3274,7 +3630,7 @@ export default function Home() {
                                                 <div className="workout-photo-grid edit-workout-photo-grid">
                                                     {editWorkoutPhotoPreviews.map((preview, index) => (
                                                         <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
-                                                            <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                            <button className="edit-workout-photo-open" type="button" aria-label={`View image ${index + 1} of ${editWorkoutPreviewUrls.length}`} onClick={() => openImagePreview(editWorkoutPreviewUrls, index)}><img src={preview.url} alt="" /></button>
                                                             <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
                                                         </div>
                                                     ))}
@@ -3430,7 +3786,7 @@ export default function Home() {
                                     const volume = exercises.reduce((sum, exercise) => sum + Number(exercise.volume || 0), 0);
                                     const workoutNameValue = workout.name || formatWorkoutName(new Date(workout.created_at));
                                     return (
-                                        <article className="workout-card-item" key={workout.id}>
+                                        <article className="workout-card-item" data-workout-id={workout.id} key={workout.id}>
                                             <div className="workout-card-top">
                                                 <button className="workout-card-main" type="button" onClick={() => setExpandedWorkoutIds((current) => isExpanded ? current.filter((id) => id !== workout.id) : [...current, workout.id])}>
                                                     <span className="workout-card-chevron"><ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={18} /></span>
@@ -3539,7 +3895,7 @@ export default function Home() {
                                             const volume = exercises.reduce((sum, exercise) => sum + Number(exercise.volume || 0), 0);
                                             return (
                                                 <Fragment key={workout.id}>
-                                                    <tr className="clickable-table-row" onClick={() => setExpandedWorkoutIds((current) => isExpanded ? current.filter((id) => id !== workout.id) : [...current, workout.id])}>
+                                                    <tr className="clickable-table-row" data-workout-id={workout.id} onClick={() => setExpandedWorkoutIds((current) => isExpanded ? current.filter((id) => id !== workout.id) : [...current, workout.id])}>
                                                         <td>
                                                             <button className="table-toggle" aria-label={isExpanded ? "Collapse workout" : "Expand workout"}>
                                                                 <ChevronDown className={isExpanded ? "chevron open" : "chevron"} size={16} />
@@ -3607,13 +3963,13 @@ export default function Home() {
                                                                                      <div className="workout-photo-grid edit-workout-photo-grid">
                                                                                          {editWorkoutPhotoUrls.map((url, index) => (
                                                                                              <div className="edit-workout-photo" key={`${workout.id}-inline-edit-photo-${index}`}>
-                                                                                                 <button className="edit-workout-photo-open" type="button" aria-label="View image" onClick={() => setPreviewImageUrl(url)}><img src={url} alt="" /></button>
+                                                                                                 <button className="edit-workout-photo-open" type="button" aria-label={`View image ${index + 1} of ${editWorkoutPreviewUrls.length}`} onClick={() => openImagePreview(editWorkoutPreviewUrls, index)}><img src={url} alt="" /></button>
                                                                                                  <button className="edit-workout-photo-remove" type="button" aria-label="Remove image" onClick={() => setEditWorkoutPhotoUrls((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
                                                                                              </div>
                                                                                          ))}
                                                                                          {editWorkoutPhotoPreviews.map((preview, index) => (
                                                                                              <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
-                                                                                                 <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                                                                 <button className="edit-workout-photo-open" type="button" aria-label={`View image ${editWorkoutPhotoUrls.length + index + 1} of ${editWorkoutPreviewUrls.length}`} onClick={() => openImagePreview(editWorkoutPreviewUrls, editWorkoutPhotoUrls.length + index)}><img src={preview.url} alt="" /></button>
                                                                                                  <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
                                                                                              </div>
                                                                                          ))}
@@ -3632,7 +3988,7 @@ export default function Home() {
                                                                                          <div className="workout-photo-grid edit-workout-photo-grid">
                                                                                              {editWorkoutPhotoPreviews.map((preview, index) => (
                                                                                                  <div className="edit-workout-photo" key={`${preview.file.name}-${preview.file.lastModified}-${index}`}>
-                                                                                                     <button className="edit-workout-photo-open" type="button" aria-label="View selected image" onClick={() => setPreviewImageUrl(preview.url)}><img src={preview.url} alt="" /></button>
+                                                                                                     <button className="edit-workout-photo-open" type="button" aria-label={`View image ${index + 1} of ${editWorkoutPreviewUrls.length}`} onClick={() => openImagePreview(editWorkoutPreviewUrls, index)}><img src={preview.url} alt="" /></button>
                                                                                                      <button className="edit-workout-photo-remove" type="button" aria-label="Remove selected image" onClick={() => setEditWorkoutPhotos((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button>
                                                                                                  </div>
                                                                                              ))}
@@ -4074,6 +4430,16 @@ export default function Home() {
                             <span><strong>Mode</strong><small>{theme === "dark" ? "Dark" : "Light"}</small></span>
                             <ChevronRight size={17} />
                         </button>
+                        <button className="settings-row" type="button" onClick={() => void openPermissionsMenu()}>
+                            <span className="settings-row-icon"><Bell size={18} /></span>
+                            <span><strong>Permissions</strong><small>Notifications and camera access</small></span>
+                            <ChevronRight size={17} />
+                        </button>
+                        <button className="settings-row" type="button" onClick={openTrainingCalendar}>
+                            <span className="settings-row-icon"><Calendar size={18} /></span>
+                            <span><strong>Training calendar</strong><small>Month and year workout overview</small></span>
+                            <ChevronRight size={17} />
+                        </button>
                         <button className="settings-row" type="button" onClick={() => setAgentModalOpen(true)}>
                             <span className="settings-row-icon"><Bot size={18} /></span>
                             <span><strong>Ask ProgressFit</strong><small>Chat with your training history</small></span>
@@ -4152,7 +4518,7 @@ export default function Home() {
                                 {REST_TIMER_OPTIONS.map((seconds) => {
                                     const selectedExercise = workoutQueue.find((exercise) => exercise.id === restTimerExerciseId);
                                     return (
-                                    <button className={(selectedExercise?.restTimerSeconds ?? 0) === seconds ? "active" : ""} type="button" key={seconds} onClick={() => { setWorkoutQueue((current) => current.map((exercise) => exercise.id === restTimerExerciseId ? { ...exercise, restTimerSeconds: seconds } : exercise)); if (!seconds) { cancelNativeRestTimerNotification(); setRestTimerRemaining(0); setRestTimerTotal(0); setRestTimerEndAt(0); } setRestTimerSheetOpen(false); }}>
+                                    <button className={(selectedExercise?.restTimerSeconds ?? 0) === seconds ? "active" : ""} type="button" key={seconds} onClick={() => { setWorkoutQueue((current) => current.map((exercise) => exercise.id === restTimerExerciseId ? { ...exercise, restTimerSeconds: seconds } : exercise)); if (!seconds) { cancelNativeRestTimerNotification(); endRestTimerLiveActivity(true); setRestTimerRemaining(0); setRestTimerTotal(0); setRestTimerEndAt(0); } setRestTimerSheetOpen(false); }}>
                                         {formatRestOption(seconds)}
                                     </button>
                                     );
@@ -4453,7 +4819,7 @@ export default function Home() {
             <Dialog.Root open={workoutNameModalOpen} onOpenChange={setWorkoutNameModalOpen}>
                 <Dialog.Portal>
                     <Dialog.Overlay className="dialog-overlay" />
-                    <Dialog.Content className="dialog-content">
+                    <Dialog.Content className="dialog-content save-workout-dialog">
                         <Dialog.Title className="dialog-title">Save workout</Dialog.Title>
                         <Dialog.Description className="dialog-description">Name this workout, or leave the default.</Dialog.Description>
                         <input className="input" value={workoutNameInput} onChange={(event) => setWorkoutNameInput(event.target.value)} placeholder={formatWorkoutName()} />
@@ -4468,7 +4834,7 @@ export default function Home() {
             <Dialog.Root open={finishDetailsModalOpen} onOpenChange={(open) => { if (!saving) { setFinishDetailsModalOpen(open); if (!open) setFinishSummary(null); } }}>
                 <Dialog.Portal>
                     <Dialog.Overlay className="dialog-overlay" />
-                    <Dialog.Content className="dialog-content finish-details-dialog">
+                    <Dialog.Content className="dialog-content finish-details-dialog" onPointerDown={dismissFinishKeyboard}>
                         <Dialog.Title className="dialog-title">Finish workout</Dialog.Title>
                         <Dialog.Description className="dialog-description">Review your workout and add details before saving.</Dialog.Description>
                         <div className="finish-details-body">
@@ -4506,20 +4872,218 @@ export default function Home() {
                             </div>
                         </div>
                         <div className="dialog-actions finish-details-actions">
-                            <button className="btn secondary" type="button" disabled={saving} onClick={() => setFinishDetailsModalOpen(false)}>Cancel</button>
+                            <button className="btn secondary" type="button" disabled={saving} onPointerDown={(event) => { event.stopPropagation(); setFinishDetailsModalOpen(false); }} onClick={() => setFinishDetailsModalOpen(false)}>Cancel</button>
                             <button className="btn" type="button" disabled={saving} onClick={() => finishWorkout({ title: finishWorkoutNameInput, notes: finishWorkoutNotes, photos: finishWorkoutPhotos })}>{saving ? "Saving..." : "Save workout"}</button>
                         </div>
                     </Dialog.Content>
                 </Dialog.Portal>
             </Dialog.Root>
 
-            <Dialog.Root open={Boolean(previewImageUrl)} onOpenChange={(open) => !open && setPreviewImageUrl("")}>
+            <Dialog.Root open={trainingCalendarOpen} onOpenChange={(open) => {
+                if (!open && imagePreview) return;
+                setTrainingCalendarOpen(open);
+            }}>
+                <Dialog.Portal>
+                    <Dialog.Overlay className="dialog-overlay" />
+                    <Dialog.Content className="training-calendar-dialog" onPointerDownOutside={(event) => { if (imagePreview) event.preventDefault(); }}>
+                        <div className="training-calendar-header">
+                            <Dialog.Close asChild><button className="btn secondary icon-btn training-calendar-back" type="button" aria-label="Close training calendar"><ChevronLeft size={20} /></button></Dialog.Close>
+                            <Dialog.Title className="dialog-title">Training calendar</Dialog.Title>
+                            <span className="training-calendar-header-spacer" />
+                        </div>
+                        <Dialog.Description className="sr-only">Workout days are highlighted. Select a workout day to open its workout.</Dialog.Description>
+                        <div className="training-calendar-view-toggle" role="group" aria-label="Calendar view">
+                            <button className={trainingCalendarView === "month" ? "active" : ""} type="button" onClick={() => setTrainingCalendarView("month")}>Month</button>
+                            <button className={trainingCalendarView === "year" ? "active" : ""} type="button" onClick={() => setTrainingCalendarView("year")}>Year</button>
+                        </div>
+                        {trainingCalendarView === "month" ? (
+                            <div className="training-calendar-month-view">
+                                {selectedCalendarWorkouts.length > 1 && (
+                                    <div className="training-calendar-day-detail">
+                                        <strong>{format(inputDateToDate(selectedTrainingDate) ?? new Date(), "EEEE, MMMM d, yyyy")}</strong>
+                                        {selectedCalendarWorkouts.map((workout) => (
+                                        <button className="calendar-workout-link" type="button" key={workout.id} onClick={() => openCalendarWorkout(workout)}>
+                                            <span><strong>{workout.name || formatWorkoutName(new Date(workout.created_at))}</strong><small>{(workout.workout_exercises ?? []).length} exercises • {formatDurationSeconds(workout.duration_seconds)}</small></span>
+                                            <ChevronRight size={18} />
+                                        </button>
+                                        ))}
+                                    </div>
+                                )}
+                                <div className="training-calendar-weekdays" aria-hidden="true">
+                                    {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => <span key={day}>{day}</span>)}
+                                </div>
+                                <div className="training-calendar-month-scroll">
+                                    {trainingCalendarMonths.map(({ month, cells }) => (
+                                        <section className="training-calendar-month" data-calendar-month={format(new Date(trainingCalendarYear, month, 1), "yyyy-MM")} key={month}>
+                                            <h2>{format(new Date(trainingCalendarYear, month, 1), "MMMM yyyy")}</h2>
+                                            <div className="training-calendar-date-grid">
+                                                {cells.map((date, index) => {
+                                                    if (!date) return <span className="training-calendar-empty-date" key={`empty-${index}`} />;
+                                                    const key = format(date, "yyyy-MM-dd");
+                                                    const workouts = workoutsByDate.get(key) ?? [];
+                                                    return (
+                                                        <button className={`${workouts.length ? "has-workout " : ""}${selectedTrainingDate === key ? "selected " : ""}${key === todayInputValue() ? "today" : ""}`} type="button" key={key} onClick={() => selectTrainingCalendarDate(date)}>
+                                                            <span>{date.getDate()}</span>
+                                                            {workouts.length > 0 && <small>{workouts[0].name || "Workout"}{workouts.length > 1 ? ` +${workouts.length - 1}` : ""}</small>}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </section>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="training-calendar-year-view">
+                                <div className="training-calendar-year-nav">
+                                    <button className="btn secondary icon-btn" type="button" aria-label="Previous year" onClick={() => setTrainingCalendarMonth(new Date(trainingCalendarYear - 1, trainingCalendarMonth.getMonth(), 1))}><ChevronLeft size={18} /></button>
+                                    <strong>{trainingCalendarYear}</strong>
+                                    <button className="btn secondary icon-btn" type="button" aria-label="Next year" disabled={trainingCalendarYear >= currentCalendarDate.getFullYear()} onClick={() => setTrainingCalendarMonth(new Date(trainingCalendarYear + 1, trainingCalendarMonth.getMonth(), 1))}><ChevronRight size={18} /></button>
+                                </div>
+                                <div className="training-calendar-year-grid">
+                                    {trainingCalendarMonths.map(({ month, cells }) => (
+                                        <section className="training-calendar-mini-month" key={month}>
+                                            <h3>{format(new Date(trainingCalendarYear, month, 1), "MMM")}</h3>
+                                            <div className="training-calendar-mini-grid">
+                                                {cells.map((date, index) => {
+                                                    if (!date) return <span className="empty" key={`empty-${index}`} />;
+                                                    const key = format(date, "yyyy-MM-dd");
+                                                    const active = workoutsByDate.has(key);
+                                                    return <button className={`${active ? "active " : ""}${key === todayInputValue() ? "today" : ""}`} type="button" aria-label={`${format(date, "MMMM d")}${active ? ", workout" : ""}`} key={key} onClick={() => selectTrainingCalendarDate(date, true)} />;
+                                                })}
+                                            </div>
+                                        </section>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        {selectedCalendarWorkout && (
+                            <div className="calendar-workout-detail-overlay">
+                                <div className="expanded-view-top calendar-readonly-workout-top">
+                                    <div className="expanded-workout-title-row">
+                                        <button className="btn secondary icon-btn training-calendar-back" type="button" aria-label="Back to calendar" onClick={() => setCalendarWorkoutId("")}><ChevronLeft size={20} /></button>
+                                        <div className="calendar-readonly-workout-name">
+                                            <strong>{selectedCalendarWorkout.name || formatWorkoutName(new Date(selectedCalendarWorkout.created_at))}</strong>
+                                            <small>{format(new Date(selectedCalendarWorkout.created_at), "EEEE, MMMM d, yyyy")}</small>
+                                        </div>
+                                        <Dialog.Close asChild><button className="bare-icon-btn calendar-readonly-close" type="button" aria-label="Close training calendar"><X size={20} /></button></Dialog.Close>
+                                    </div>
+                                    <div className="expanded-workout-stats" aria-label="Workout summary">
+                                        <span><small>Duration</small><strong>{formatDurationSeconds(selectedCalendarWorkout.duration_seconds)}</strong></span>
+                                        <span><small>Volume</small><strong>{(selectedCalendarWorkout.workout_exercises ?? []).reduce((sum, exercise) => sum + Number(exercise.volume || 0), 0)} lbs</strong></span>
+                                        <span><small>Sets</small><strong>{(selectedCalendarWorkout.workout_exercises ?? []).reduce((sum, exercise) => sum + (exercise.set_rows?.length || 1), 0)}</strong></span>
+                                    </div>
+                                </div>
+                                <div className="saved-workout-editor-scroll calendar-workout-detail-scroll">
+                                    <div className="edit-workout-details-panel calendar-readonly-details-panel">
+                                        <div className="field-label">
+                                            <span>Description</span>
+                                            <div className={`input calendar-readonly-description${selectedCalendarWorkout.notes ? "" : " empty"}`}>{selectedCalendarWorkout.notes || "No workout description"}</div>
+                                        </div>
+                                        {(selectedCalendarWorkout.photo_urls ?? []).length > 0 && (
+                                            <div className="field-label">
+                                                <span>Images</span>
+                                                <div className="workout-photo-grid edit-workout-photo-grid">
+                                                    {(selectedCalendarWorkout.photo_urls ?? []).map((url, index, urls) => (
+                                                        <div className="edit-workout-photo" key={url}>
+                                                            <button className="edit-workout-photo-open" type="button" aria-label={`View workout image ${index + 1}`} onClick={() => openImagePreview(urls, index)}><img src={url} alt="" /></button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="workout-card-detail calendar-readonly-exercise-list">
+                                        {(selectedCalendarWorkout.workout_exercises ?? []).map((exercise) => {
+                                            const rows = exercise.set_rows?.length ? exercise.set_rows : [{ set: 1, reps: exercise.reps, weight: exercise.weight, notes: "" }];
+                                            const exerciseMeta = workoutExerciseMeta.get(normalise(exercise.exercise_name));
+                                            const isExerciseExpanded = calendarExpandedExerciseIds.includes(exercise.id);
+                                            const bestRow = rows.reduce<WorkoutSetRow | null>((best, set) => !best || Number(set.weight) > Number(best.weight) ? set : best, null);
+                                            return (
+                                                <section className="workout-card-exercise calendar-readonly-exercise" key={exercise.id}>
+                                                    <div className="workout-card-exercise-head calendar-readonly-exercise-head">
+                                                        <button className="workout-card-exercise-toggle calendar-readonly-exercise-toggle" type="button" aria-expanded={isExerciseExpanded} onClick={() => setCalendarExpandedExerciseIds((current) => current.includes(exercise.id) ? current.filter((id) => id !== exercise.id) : [...current, exercise.id])}>
+                                                            <ChevronDown className={isExerciseExpanded ? "chevron open" : "chevron"} size={16} />
+                                                            <span className="exercise-suggestion-icon">{exerciseMeta?.image_url ? <img src={exerciseMeta.image_url} alt="" /> : <Dumbbell size={17} />}</span>
+                                                            <span><strong>{exercise.exercise_name}</strong><small>{rows.length} {rows.length === 1 ? "set" : "sets"}{bestRow ? ` • best ${bestRow.weight} lbs × ${bestRow.reps}` : ""}</small></span>
+                                                        </button>
+                                                    </div>
+                                                    {isExerciseExpanded && (
+                                                        <div className="calendar-readonly-exercise-body">
+                                                            {exercise.notes && <p className="workout-card-exercise-notes">{exercise.notes}</p>}
+                                                            <div className="workout-card-set-table calendar-readonly-set-table" aria-label={`${exercise.exercise_name} sets`}>
+                                                                <div className="workout-card-set-head" aria-hidden="true"><span>Set</span><span>Weight</span><span>Reps</span></div>
+                                                                {rows.map((set, index) => (
+                                                                    <div className="workout-card-set-row" key={`${exercise.id}-${set.set}-${index}`}>
+                                                                        <span>{index + 1}</span><span>{set.weight} lbs</span><span>{set.reps}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </section>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </Dialog.Content>
+                </Dialog.Portal>
+            </Dialog.Root>
+
+            <Dialog.Root open={permissionsModalOpen} onOpenChange={(open) => { setPermissionsModalOpen(open); if (open) void refreshPermissionStatuses(); }}>
+                <Dialog.Portal>
+                    <Dialog.Overlay className="dialog-overlay" />
+                    <Dialog.Content className="dialog-content permissions-dialog">
+                        <Dialog.Title className="dialog-title">Permissions</Dialog.Title>
+                        <Dialog.Description className="dialog-description">Control what ProgressFit uses. System access can be changed in iOS Settings.</Dialog.Description>
+                        <div className="permission-setting-list">
+                            <div className="permission-setting-row">
+                                <span className="settings-row-icon"><Bell size={18} /></span>
+                                <span className="permission-setting-copy">
+                                    <strong>Notifications</strong>
+                                    <small>{notificationsEnabled ? permissionLabel(notificationPermission) : "Off in ProgressFit"}</small>
+                                </span>
+                                <button className={notificationsEnabled ? "permission-switch enabled" : "permission-switch"} type="button" role="switch" aria-checked={notificationsEnabled} aria-label="Workout notifications" onClick={() => void toggleNotificationsEnabled()}><span /></button>
+                            </div>
+                            {notificationsEnabled && notificationPermission === "denied" && Capacitor.getPlatform() === "ios" && (
+                                <button className="btn secondary permission-manage-btn" type="button" onClick={() => void openSystemSettings()}>Manage notifications in iOS Settings</button>
+                            )}
+                            <div className="permission-setting-row">
+                                <span className="settings-row-icon"><Camera size={18} /></span>
+                                <span className="permission-setting-copy">
+                                    <strong>Camera</strong>
+                                    <small>{permissionLabel(cameraPermission)}</small>
+                                </span>
+                                {Capacitor.getPlatform() === "ios" && cameraPermission === "prompt" ? (
+                                    <button className="btn secondary permission-action-btn" type="button" onClick={() => void requestCameraAccess()}>Allow</button>
+                                ) : Capacitor.getPlatform() === "ios" ? (
+                                    <button className="btn secondary permission-action-btn" type="button" onClick={() => void openSystemSettings()}>Manage</button>
+                                ) : null}
+                            </div>
+                        </div>
+                        <div className="dialog-actions"><Dialog.Close asChild><button className="btn">Done</button></Dialog.Close></div>
+                    </Dialog.Content>
+                </Dialog.Portal>
+            </Dialog.Root>
+
+            <Dialog.Root open={Boolean(imagePreview)} onOpenChange={(open) => !open && setImagePreview(null)}>
                 <Dialog.Portal>
                     <Dialog.Overlay className="dialog-overlay image-preview-overlay" />
-                    <Dialog.Content className="image-preview-dialog">
+                    <Dialog.Content className="image-preview-dialog" onTouchStart={startImagePreviewSwipe} onTouchEnd={endImagePreviewSwipe}>
                         <Dialog.Title className="sr-only">Workout image</Dialog.Title>
-                        <button className="image-preview-close" type="button" aria-label="Close image" onClick={() => setPreviewImageUrl("")}><X size={20} /></button>
-                        {previewImageUrl && <img src={previewImageUrl} alt="" />}
+                        <button className="image-preview-close" type="button" aria-label="Close image viewer" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setImagePreview(null); }}><X size={20} /></button>
+                        {imagePreview && imagePreview.urls.length > 1 && (
+                            <>
+                                <button className="image-preview-nav previous" type="button" aria-label="Previous image" onClick={() => moveImagePreview(-1)}><ChevronLeft size={24} /></button>
+                                <button className="image-preview-nav next" type="button" aria-label="Next image" onClick={() => moveImagePreview(1)}><ChevronRight size={24} /></button>
+                                <span className="image-preview-counter">{imagePreview.index + 1} / {imagePreview.urls.length}</span>
+                            </>
+                        )}
+                        <div className="image-preview-stage">
+                            {previewImageUrl && <img key={previewImageUrl} src={previewImageUrl} alt={`Workout image ${(imagePreview?.index ?? 0) + 1}`} />}
+                        </div>
                     </Dialog.Content>
                 </Dialog.Portal>
             </Dialog.Root>
