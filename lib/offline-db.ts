@@ -1,4 +1,5 @@
 import Dexie, { type Table } from "dexie";
+import type { PrBaseline } from "./personal-records";
 
 export type OfflineQueueItem = {
   id?: number;
@@ -18,9 +19,17 @@ export type CachedExerciseCatalogItem = {
   cachedAt: string;
 };
 
+export type CachedPrBaseline = PrBaseline & {
+  id: string;
+  userKey: string;
+  exerciseKey: string;
+  cachedAt: string;
+};
+
 class ProgressFitOfflineDb extends Dexie {
   queue!: Table<OfflineQueueItem, number>;
   exerciseCatalog!: Table<CachedExerciseCatalogItem, string>;
+  prBaselines!: Table<CachedPrBaseline, string>;
 
   constructor() {
     super("progressfit-offline");
@@ -30,6 +39,11 @@ class ProgressFitOfflineDb extends Dexie {
     this.version(2).stores({
       queue: "++id,userKey,type,createdAt",
       exerciseCatalog: "id,name,cachedAt",
+    });
+    this.version(3).stores({
+      queue: "++id,userKey,type,createdAt",
+      exerciseCatalog: "id,name,cachedAt",
+      prBaselines: "id,userKey,exerciseKey,cachedAt",
     });
   }
 }
@@ -59,4 +73,26 @@ export async function searchCachedExerciseCatalog(query: string, limit = 8) {
     .filter((item) => item.name.toLowerCase().includes(q))
     .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, limit);
+}
+
+export async function cachePrBaselines(userKey: string, baselines: Array<{ exerciseKey: string; baseline: PrBaseline }>) {
+  if (!userKey || !baselines.length) return;
+  const cachedAt = new Date().toISOString();
+  await offlineDb.prBaselines.bulkPut(baselines.map(({ exerciseKey, baseline }) => ({
+    ...baseline,
+    id: `${userKey}:${exerciseKey}`,
+    userKey,
+    exerciseKey,
+    cachedAt,
+  })));
+}
+
+export async function getCachedPrBaselines(userKey: string, exerciseKeys: string[]) {
+  const ids = exerciseKeys.map((exerciseKey) => `${userKey}:${exerciseKey}`);
+  const rows = await offlineDb.prBaselines.bulkGet(ids);
+  return rows.filter((row): row is CachedPrBaseline => Boolean(row));
+}
+
+export async function invalidateCachedPrBaselines(userKey: string, exerciseKeys: string[]) {
+  await offlineDb.prBaselines.bulkDelete(exerciseKeys.map((exerciseKey) => `${userKey}:${exerciseKey}`));
 }

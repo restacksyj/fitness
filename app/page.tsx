@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { Keyboard, KeyboardResize } from "@capacitor/keyboard";
+import { Haptics } from "@capacitor/haptics";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { StatusBar, Style as StatusBarStyle } from "@capacitor/status-bar";
 import { LiveActivity } from "capacitor-live-activity";
@@ -10,12 +11,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
 import { format } from "date-fns";
 import { AnimatePresence, motion } from "framer-motion";
-import { Fragment, useEffect, useMemo, useRef, useState, type PointerEvent, type TouchEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type FocusEvent, type PointerEvent, type TouchEvent } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { Activity, Bell, Bot, Calendar, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Dumbbell, Edit3, Eraser, LogIn, LogOut, Maximize2, Minimize2, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
+import { Activity, Award, Bell, Bot, Calendar, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, Dumbbell, Edit3, Eraser, LogIn, LogOut, Maximize2, Medal, Minimize2, Moon, Plus, RefreshCw, Save, Search, Send, Sun, Trash2, X } from "lucide-react";
 import { CartesianGrid, Label, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from "recharts";
-import { cacheExerciseCatalog, enqueueOffline, getOfflineQueueCount, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
+import { cacheExerciseCatalog, cachePrBaselines, enqueueOffline, getCachedPrBaselines, getOfflineQueueCount, invalidateCachedPrBaselines, offlineDb, searchCachedExerciseCatalog, type OfflineQueueItem } from "@/lib/offline-db";
+import { calculatePrAchievements, EMPTY_PR_BASELINE, formatPrValue, PR_LABELS, type PrAchievement, type PrBaseline } from "@/lib/personal-records";
 import { isSupabaseConfigured, supabase, type BodyWeight, type CustomExercise, type ExerciseCatalogItem, type Routine, type RoutineExercise, type Workout, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
 import { blankExercise, blankSet, loadWorkoutDraft, saveWorkoutDraft, type ExerciseDraft, type SetRow } from "@/lib/workout-draft";
 import { useTheme } from "./providers";
@@ -47,8 +49,19 @@ type AgentAnswer = { answer: string; breakdown?: Array<{ label: string; value: n
 type AgentChatMessage = { id: string; role: "user" | "assistant"; content: string; breakdown?: AgentAnswer["breakdown"]; tables?: AgentTable[] };
 type EditableWorkoutExercise = { id: string; name: string; notes: string; setRows: EditableSetRow[]; image_url?: string | null; equipment?: string[]; isNew?: boolean };
 type RoutineBuilderDraft = { open: boolean; editingRoutineId: string; title: string; exercises: EditableWorkoutExercise[]; expandedIds: string[] };
-type OfflineWorkoutPayload = { name: string; notes?: string | null; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }>; notes?: string | null; body_weight?: number | null }> };
+type OfflineWorkoutPayload = { name: string; notes?: string | null; exercises: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string; pr_achievements?: PrAchievement[] }>; notes?: string | null; body_weight?: number | null }> };
 type OfflineBodyWeightPayload = { user_key: string; weight: number; measured_on: string; notes: string | null };
+type PrBaselineRpcRow = {
+    exercise_key: string;
+    historical_sessions: number | string;
+    max_weight: number | string;
+    max_estimated_1rm: number | string;
+    max_set_volume: number | string;
+    max_session_volume: number | string;
+    max_set_reps: number | string;
+    max_session_reps: number | string;
+};
+type PrToastMessage = { exerciseName: string; text: string; imageUrl: string | null };
 const TRACKER_DRAFT_KEY = "progressfit-exercise-tracker-draft";
 const NOTIFICATIONS_ENABLED_KEY = "progressfit-notifications-enabled";
 const WORKOUT_UI_STATE_KEY = "progressfit-workout-ui-state";
@@ -370,6 +383,12 @@ export default function Home() {
     const [draftReady, setDraftReady] = useState(false);
     const [saving, setSaving] = useState(false);
     const [toast, setToast] = useState("");
+    const [prToast, setPrToast] = useState<PrToastMessage | null>(null);
+    const [prToastPhase, setPrToastPhase] = useState<"icon" | "open" | "closing">("icon");
+    const [prBaselines, setPrBaselines] = useState<Map<string, PrBaseline>>(new Map());
+    const [editPrBaselines, setEditPrBaselines] = useState<Map<string, PrBaseline>>(new Map());
+    const [prBaselineRefreshNonce, setPrBaselineRefreshNonce] = useState(0);
+    const [prSheet, setPrSheet] = useState<{ exerciseName: string; setNumber: number; achievements: PrAchievement[] } | null>(null);
     const [isOnline, setIsOnline] = useState(true);
     const [offlineQueueCount, setOfflineQueueCount] = useState(0);
     const [syncingOffline, setSyncingOffline] = useState(false);
@@ -386,10 +405,61 @@ export default function Home() {
     const restTimerNotificationIdRef = useRef(41045);
     const workoutInactivityNotificationIdRef = useRef(41046);
     const restTimerLiveActivityExerciseRef = useRef("Rest timer");
+    const prToastQueueRef = useRef<PrToastMessage[][]>([]);
+    const prToastTimerRef = useRef<number | null>(null);
 
     function showToast(message: string) {
         setToast(message);
         window.setTimeout(() => setToast(""), TOAST_DURATION_MS);
+    }
+
+    function runNextPrToastGroup() {
+        const messages = prToastQueueRef.current.shift();
+        if (!messages?.length) {
+            prToastTimerRef.current = null;
+            setPrToast(null);
+            return;
+        }
+        let index = 0;
+        const showMessage = () => {
+            setPrToast(messages[index]);
+            const duration = messages.length === 1 ? 2800 : 1400;
+            prToastTimerRef.current = window.setTimeout(() => {
+                index += 1;
+                if (index < messages.length) showMessage();
+                else {
+                    setPrToastPhase("closing");
+                    prToastTimerRef.current = window.setTimeout(() => {
+                        setPrToast(null);
+                        if (prToastQueueRef.current.length) runNextPrToastGroup();
+                        else prToastTimerRef.current = null;
+                    }, 380);
+                }
+            }, duration);
+        };
+        setPrToast(messages[0]);
+        setPrToastPhase("icon");
+        prToastTimerRef.current = window.setTimeout(() => {
+            setPrToastPhase("open");
+            showMessage();
+        }, 220);
+    }
+
+    function playPrFeedback() {
+        playPrSound();
+        if (!Capacitor.isNativePlatform()) return;
+        void Haptics.vibrate({ duration: 500 }).catch(() => undefined);
+    }
+
+    function announcePrAchievements(exerciseName: string, imageUrl: string | null | undefined, achievements: PrAchievement[]) {
+        if (!achievements.length) return;
+        playPrFeedback();
+        prToastQueueRef.current.push(achievements.map((achievement) => ({
+            exerciseName,
+            imageUrl: imageUrl ?? workoutExerciseMeta.get(normalise(exerciseName))?.image_url ?? null,
+            text: `${PR_LABELS[achievement.type]} - ${formatPrValue(achievement.type, achievement.value)}`,
+        })));
+        if (prToastTimerRef.current === null) runNextPrToastGroup();
     }
 
     useEffect(() => {
@@ -399,6 +469,10 @@ export default function Home() {
 
     useEffect(() => {
         setNotificationsEnabled(localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) !== "false");
+    }, []);
+
+    useEffect(() => () => {
+        if (prToastTimerRef.current !== null) window.clearTimeout(prToastTimerRef.current);
     }, []);
 
     useEffect(() => {
@@ -479,6 +553,8 @@ export default function Home() {
             const offsetTop = Math.round(viewport?.offsetTop ?? 0);
             document.documentElement.style.setProperty("--app-viewport-height", `${height}px`);
             document.documentElement.style.setProperty("--app-viewport-offset-top", `${offsetTop}px`);
+            const activeInput = document.activeElement;
+            if (activeInput instanceof HTMLInputElement && activeInput.closest(".tracker-set-row")) scrollTrackerInputIntoView(activeInput);
         };
         updateViewportHeight();
         window.visualViewport?.addEventListener("resize", updateViewportHeight);
@@ -498,6 +574,8 @@ export default function Home() {
         const showListener = Keyboard.addListener("keyboardWillShow", ({ keyboardHeight }) => {
             root.classList.add("keyboard-visible");
             root.style.setProperty("--keyboard-height", `${keyboardHeight}px`);
+            const activeInput = document.activeElement;
+            if (activeInput instanceof HTMLInputElement && activeInput.closest(".tracker-set-row")) scrollTrackerInputIntoView(activeInput, keyboardHeight);
         });
         const hideListener = Keyboard.addListener("keyboardWillHide", () => {
             root.classList.remove("keyboard-visible");
@@ -523,6 +601,33 @@ export default function Home() {
         if (target.closest("input, textarea, select, label, button, a, [role='button']")) return;
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         if (Capacitor.getPlatform() === "ios") void Keyboard.hide();
+    }
+
+    function scrollTrackerInputIntoView(input: HTMLInputElement, keyboardHeight = 0) {
+        const row = input.closest<HTMLElement>(".swipe-set-row");
+        if (!row) return;
+        const exerciseBody = row.closest<HTMLElement>(".workout-exercise-body");
+        const bodyScrolls = exerciseBody && /(auto|scroll)/.test(window.getComputedStyle(exerciseBody).overflowY);
+        const scrollContainer = bodyScrolls ? exerciseBody : row.closest<HTMLElement>(".workout-list");
+        if (!scrollContainer) {
+            row.scrollIntoView({ block: "center", behavior: "auto" });
+            return;
+        }
+
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        const viewport = window.visualViewport;
+        const viewportBottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight);
+        const keyboardTop = keyboardHeight > 0 ? window.innerHeight - keyboardHeight : window.innerHeight * 0.54;
+        const visibleBottom = Math.min(containerRect.bottom, viewportBottom, keyboardTop) - 18;
+        const visibleTop = Math.max(containerRect.top, viewport?.offsetTop ?? 0) + 12;
+
+        if (rowRect.bottom > visibleBottom) scrollContainer.scrollTop += rowRect.bottom - visibleBottom;
+        else if (rowRect.top < visibleTop) scrollContainer.scrollTop -= visibleTop - rowRect.top;
+    }
+
+    function focusTrackerSetInput(event: FocusEvent<HTMLInputElement>) {
+        scrollTrackerInputIntoView(event.currentTarget);
     }
 
     useEffect(() => {
@@ -707,6 +812,8 @@ export default function Home() {
     const workoutExerciseMeta = useMemo(() => {
         return new Map(muscleCatalog.map((exercise) => [normalise(exercise.name), exercise]));
     }, [muscleCatalog]);
+    const activePrExerciseNames = useMemo(() => Array.from(new Map(workoutQueue.filter((exercise) => exercise.name.trim()).map((exercise) => [normalise(exercise.name), exercise.name.trim()])).values()), [workoutQueue]);
+    const activePrExerciseNamesKey = activePrExerciseNames.map(normalise).sort().join("|");
 
     const finishWorkoutPhotoPreviews = useMemo(() => finishWorkoutPhotos.map((file) => ({ file, url: URL.createObjectURL(file) })), [finishWorkoutPhotos]);
     const editWorkoutPhotoPreviews = useMemo(() => editWorkoutPhotos.map((file) => ({ file, url: URL.createObjectURL(file) })), [editWorkoutPhotos]);
@@ -1156,7 +1263,7 @@ export default function Home() {
         localStorage.setItem(cacheKey, new Date().toISOString());
     }
 
-    async function updateOfflineQueuedExercise(exercise: ExerciseDraft, name: string, rows: Array<{ set: number; reps: number; weight: number; notes?: string }>) {
+    async function updateOfflineQueuedExercise(exercise: ExerciseDraft, name: string, rows: Array<{ set: number; reps: number; weight: number; notes?: string; pr_achievements?: PrAchievement[] }>) {
         const queueId = exercise.savedExerciseId ? offlineQueueIdFrom(exercise.savedExerciseId) : NaN;
         if (!Number.isFinite(queueId)) return false;
         const queued = await offlineDb.queue.get(queueId);
@@ -1182,6 +1289,27 @@ export default function Home() {
         if (item.type === "save_workout") {
             const payload = item.payload as OfflineWorkoutPayload;
             if (!payload.exercises.length) return;
+            const { data: baselineRows, error: baselineError } = await supabase.rpc("get_exercise_pr_baselines", {
+                exercise_names: payload.exercises.map((exercise) => exercise.name),
+                before_timestamp: new Date().toISOString(),
+            });
+            if (baselineError) throw baselineError;
+            const authoritativeBaselines = new Map(((baselineRows ?? []) as PrBaselineRpcRow[]).map((row) => [normalise(row.exercise_key), baselineFromRpcRow(row)]));
+            const reconciledExercises = payload.exercises.map((exercise) => {
+                const baseline = authoritativeBaselines.get(normalise(exercise.name)) ?? EMPTY_PR_BASELINE;
+                const bodyweight = exerciseIsBodyweight(exercise.name);
+                const setIds = exercise.sets.map((_, index) => `offline-${index}`);
+                const achievements = calculatePrAchievements(exercise.sets.map((set, index) => ({
+                    id: setIds[index],
+                    reps: set.reps,
+                    weight: bodyweight ? 0 : set.weight,
+                    completed: true,
+                })), baseline, bodyweight);
+                return {
+                    ...exercise,
+                    sets: exercise.sets.map((set, index) => ({ ...set, pr_achievements: achievements.get(setIds[index]) ?? [] })),
+                };
+            });
             const { data: workout, error: workoutError } = await supabase
                 .from("workouts")
                 .insert({ user_key: item.userKey, name: payload.name, notes: payload.notes ?? null })
@@ -1189,7 +1317,7 @@ export default function Home() {
                 .single();
             if (workoutError || !workout) throw workoutError ?? new Error("Could not sync workout");
 
-            const exercises = payload.exercises.map((exercise) => ({
+            const exercises = reconciledExercises.map((exercise) => ({
                 workout_id: workout.id,
                 user_key: item.userKey,
                 exercise_name: exercise.name,
@@ -1207,6 +1335,7 @@ export default function Home() {
                 await supabase.from("workouts").delete().eq("id", workout.id).eq("user_key", item.userKey);
                 throw error;
             }
+            await invalidatePrBaselineNames(reconciledExercises.map((exercise) => exercise.name), item.userKey);
         }
     }
 
@@ -1641,12 +1770,133 @@ export default function Home() {
         return isBodyweightEquipment(equipment) || isBodyweightEquipment(workoutExerciseMeta.get(normalise(name))?.equipment);
     }
 
+    function baselineFromRpcRow(row: PrBaselineRpcRow): PrBaseline {
+        return {
+            historicalSessions: Number(row.historical_sessions) || 0,
+            maxWeight: Number(row.max_weight) || 0,
+            maxEstimated1Rm: Number(row.max_estimated_1rm) || 0,
+            maxSetVolume: Number(row.max_set_volume) || 0,
+            maxSessionVolume: Number(row.max_session_volume) || 0,
+            maxSetReps: Number(row.max_set_reps) || 0,
+            maxSessionReps: Number(row.max_session_reps) || 0,
+        };
+    }
+
+    function recalculateExercisePrs(exercise: ExerciseDraft, baselines = prBaselines) {
+        const baseline = baselines.get(normalise(exercise.name));
+        if (!baseline) return exercise;
+        const achievements = calculatePrAchievements(exercise.sets.map((set) => ({
+            id: set.id,
+            reps: Number(set.reps),
+            weight: exerciseIsBodyweight(exercise.name, exercise.equipment) ? 0 : Number(set.weight),
+            completed: Boolean(set.completed),
+        })), baseline, exerciseIsBodyweight(exercise.name, exercise.equipment));
+        return { ...exercise, sets: exercise.sets.map((set) => ({ ...set, prAchievements: achievements.get(set.id) ?? [] })) };
+    }
+
+    function recalculateEditableExercisePrs(exercise: EditableWorkoutExercise, baselines = editPrBaselines) {
+        const baseline = baselines.get(normalise(exercise.name));
+        if (!baseline) return { ...exercise, setRows: exercise.setRows.map((set) => ({ ...set, pr_achievements: [] })) };
+        const bodyweight = exerciseIsBodyweight(exercise.name, exercise.equipment);
+        const ids = exercise.setRows.map((_, index) => `${exercise.id}-${index}`);
+        const achievements = calculatePrAchievements(exercise.setRows.map((set, index) => ({
+            id: ids[index],
+            reps: Number(set.reps),
+            weight: bodyweight ? 0 : Number(set.weight),
+            completed: Number(set.reps) > 0 && (bodyweight || Number(set.weight) >= 0),
+        })), baseline, bodyweight);
+        return { ...exercise, setRows: exercise.setRows.map((set, index) => ({ ...set, pr_achievements: achievements.get(ids[index]) ?? [] })) };
+    }
+
+    async function invalidatePrBaselineNames(names: string[], key = userKey, preserveActive = false) {
+        if (!key) return;
+        const exerciseKeys = Array.from(new Set(names.map(normalise).filter(Boolean)));
+        if (!exerciseKeys.length) return;
+        await invalidateCachedPrBaselines(key, exerciseKeys);
+        if (!preserveActive) {
+            setPrBaselines((current) => {
+                const next = new Map(current);
+                exerciseKeys.forEach((exerciseKey) => next.delete(exerciseKey));
+                return next;
+            });
+            setPrBaselineRefreshNonce((current) => current + 1);
+        }
+    }
+
+    useEffect(() => {
+        if (!userKey || !activePrExerciseNames.length) return;
+        let cancelled = false;
+        const exerciseKeys = activePrExerciseNames.map(normalise);
+
+        async function loadPrBaselines() {
+            const cached = await getCachedPrBaselines(userKey, exerciseKeys);
+            if (!cancelled && cached.length) {
+                setPrBaselines((current) => {
+                    const next = new Map(current);
+                    cached.forEach((row) => next.set(row.exerciseKey, {
+                        historicalSessions: row.historicalSessions,
+                        maxWeight: row.maxWeight,
+                        maxEstimated1Rm: row.maxEstimated1Rm,
+                        maxSetVolume: row.maxSetVolume,
+                        maxSessionVolume: row.maxSessionVolume,
+                        maxSetReps: row.maxSetReps,
+                        maxSessionReps: row.maxSessionReps,
+                    }));
+                    return next;
+                });
+            }
+            if (!navigator.onLine || !isSupabaseConfigured) return;
+
+            const { data, error } = await supabase.rpc("get_exercise_pr_baselines", {
+                exercise_names: activePrExerciseNames,
+                before_timestamp: new Date().toISOString(),
+            });
+            if (cancelled) return;
+            if (error) {
+                console.warn(`PR baselines unavailable: ${error.message}`);
+                return;
+            }
+            const entries = ((data ?? []) as PrBaselineRpcRow[]).map((row) => ({ exerciseKey: normalise(row.exercise_key), baseline: baselineFromRpcRow(row) }));
+            await cachePrBaselines(userKey, entries);
+            setPrBaselines((current) => {
+                const next = new Map(current);
+                entries.forEach(({ exerciseKey, baseline }) => next.set(exerciseKey, baseline));
+                return next;
+            });
+        }
+
+        void loadPrBaselines();
+        return () => { cancelled = true; };
+    }, [activePrExerciseNamesKey, prBaselineRefreshNonce, userKey]);
+
+    useEffect(() => {
+        if (!prBaselines.size) return;
+        setWorkoutQueue((current) => current.map((exercise) => recalculateExercisePrs(exercise, prBaselines)));
+    }, [prBaselines]);
+
     function lastBestForSet(exerciseName: string, setNumber: number, bodyweight = false) {
         const record = exerciseHistoryRows.find((item) => normalise(item.exercise_name) === normalise(exerciseName));
         const row = record?.set_rows?.find((set) => Number(set.set) === setNumber);
         if (row) return bodyweight ? `${row.reps} reps` : `${row.weight} lbs x ${row.reps}`;
         if (record && setNumber === 1) return bodyweight ? `${record.reps} reps` : `${record.weight} lbs x ${record.reps}`;
         return "—";
+    }
+
+    function renderSetMarker(exerciseName: string, setNumber: number, achievements?: PrAchievement[]) {
+        if (!achievements?.length) return <span className="set-number">{setNumber}</span>;
+        return (
+            <button
+                className="pr-medal-btn"
+                type="button"
+                aria-label={`${exerciseName} set ${setNumber}: ${achievements.length} personal ${achievements.length === 1 ? "record" : "records"}`}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    setPrSheet({ exerciseName, setNumber, achievements });
+                }}
+            >
+                <Award size={21} aria-hidden="true" />
+            </button>
+        );
     }
 
     function restAudioContext() {
@@ -1674,6 +1924,40 @@ export default function Home() {
             gain.connect(context.destination);
             oscillator.start(now);
             oscillator.stop(now + 0.38);
+        }).catch(() => undefined);
+    }
+
+    function playPrSound() {
+        const context = restAudioContext();
+        if (!context) return;
+        context.resume().then(() => {
+            const now = context.currentTime;
+            const masterGain = context.createGain();
+            masterGain.gain.setValueAtTime(0.0001, now);
+            masterGain.gain.exponentialRampToValueAtTime(0.24, now + 0.012);
+            masterGain.gain.setValueAtTime(0.24, now + 0.48);
+            masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.92);
+            masterGain.connect(context.destination);
+
+            const notes = [
+                { frequency: 523.25, start: 0, duration: 0.16 },
+                { frequency: 659.25, start: 0.25, duration: 0.16 },
+                { frequency: 1046.5, start: 0.41, duration: 0.48 },
+            ];
+            notes.forEach(({ frequency, start: startOffset, duration }) => {
+                const oscillator = context.createOscillator();
+                const noteGain = context.createGain();
+                const start = now + startOffset;
+                oscillator.type = "triangle";
+                oscillator.frequency.setValueAtTime(frequency, start);
+                noteGain.gain.setValueAtTime(0.0001, start);
+                noteGain.gain.exponentialRampToValueAtTime(0.72, start + 0.012);
+                noteGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+                oscillator.connect(noteGain);
+                noteGain.connect(masterGain);
+                oscillator.start(start);
+                oscillator.stop(start + duration + 0.02);
+            });
         }).catch(() => undefined);
     }
 
@@ -2053,7 +2337,13 @@ export default function Home() {
     function validSetRows(sourceSets = sets, bodyweight = false) {
         return sourceSets
             .filter((set) => set.completed)
-            .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: bodyweight || set.weight === "" ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
+            .map((set, index) => ({
+                set: index + 1,
+                reps: Number(set.reps),
+                weight: bodyweight || set.weight === "" ? 0 : Number(set.weight),
+                notes: set.notes?.trim() || undefined,
+                pr_achievements: set.prAchievements?.length ? set.prAchievements : undefined,
+            }))
             .filter((set) => Number.isFinite(set.reps) && set.reps > 0 && Number.isFinite(set.weight) && set.weight >= 0);
     }
 
@@ -2373,6 +2663,7 @@ export default function Home() {
         setCurrentWorkoutId(workout.id);
         setWorkoutName(title);
         setSavedWorkoutName(title);
+        await invalidatePrBaselineNames(rows.map((row) => row.name), userKey, true);
         await loadData();
         setToast(`${title} saved`);
         setTimeout(() => setToast(""), TOAST_DURATION_MS);
@@ -2392,7 +2683,7 @@ export default function Home() {
         return urls;
     }
 
-    async function saveFinishedWorkout(details: FinishWorkoutDetails, rows: Array<{ exercise: ExerciseDraft; name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }> }>) {
+    async function saveFinishedWorkout(details: FinishWorkoutDetails, rows: Array<{ exercise: ExerciseDraft; name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string; pr_achievements?: PrAchievement[] }> }>) {
         const title = details.title.trim() || formatWorkoutName();
         const notes = details.notes.trim() || null;
         if (!isSupabaseConfigured) {
@@ -2460,6 +2751,7 @@ export default function Home() {
             alert(error.message);
             return false;
         }
+        await invalidatePrBaselineNames(rows.map((row) => row.name), userKey, true);
         return true;
     }
 
@@ -2470,7 +2762,7 @@ export default function Home() {
         setEditWorkoutNotes(workout.notes ?? "");
         setEditWorkoutPhotoUrls(workout.photo_urls ?? []);
         setEditWorkoutPhotos([]);
-        setEditWorkoutExercises((workout.workout_exercises ?? []).map((exercise) => ({
+        const drafts = (workout.workout_exercises ?? []).map((exercise) => ({
             id: exercise.id,
             name: exercise.exercise_name,
             notes: exercise.notes ?? "",
@@ -2481,8 +2773,25 @@ export default function Home() {
                 reps: Number(set.reps),
                 weight: Number(set.weight),
                 notes: set.notes ?? "",
+                pr_achievements: set.pr_achievements,
             })),
-        })));
+        }));
+        setEditWorkoutExercises(drafts);
+        setEditPrBaselines(new Map());
+        if (navigator.onLine && isSupabaseConfigured && drafts.length) {
+            void supabase.rpc("get_exercise_pr_baselines", {
+                exercise_names: drafts.map((exercise) => exercise.name),
+                before_timestamp: workout.created_at,
+            }).then(({ data, error }) => {
+                if (error) {
+                    console.warn(`Edit PR baselines unavailable: ${error.message}`);
+                    return;
+                }
+                const baselines = new Map(((data ?? []) as PrBaselineRpcRow[]).map((row) => [normalise(row.exercise_key), baselineFromRpcRow(row)]));
+                setEditPrBaselines(baselines);
+                setEditWorkoutExercises((current) => current.map((exercise) => recalculateEditableExercisePrs(exercise, baselines)));
+            });
+        }
     }
 
     function cancelEditWorkout() {
@@ -2493,17 +2802,18 @@ export default function Home() {
         setEditWorkoutPhotoUrls([]);
         setEditWorkoutPhotos([]);
         setEditWorkoutExercises([]);
+        setEditPrBaselines(new Map());
     }
 
     function updateEditWorkoutExercise(exerciseId: string, patch: Partial<EditableWorkoutExercise>) {
-        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? { ...exercise, ...patch } : exercise));
+        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? recalculateEditableExercisePrs({ ...exercise, ...patch }) : exercise));
     }
 
     function updateEditWorkoutSet(exerciseId: string, setIndex: number, patch: Partial<WorkoutSetRow>) {
-        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? {
+        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? recalculateEditableExercisePrs({
             ...exercise,
             setRows: exercise.setRows.map((set, index) => index === setIndex ? { ...set, ...patch } : set),
-        } : exercise));
+        }) : exercise));
     }
 
     function addEditWorkoutSet(exerciseId: string) {
@@ -2511,15 +2821,15 @@ export default function Home() {
             if (exercise.id !== exerciseId) return exercise;
             const previous = exercise.setRows.at(-1);
             const nextSet = previous ? { set: exercise.setRows.length + 1, reps: previous.reps, weight: previous.weight, notes: "" } : { set: 1, reps: 0, weight: 0, notes: "" };
-            return { ...exercise, setRows: [...exercise.setRows, nextSet] };
+            return recalculateEditableExercisePrs({ ...exercise, setRows: [...exercise.setRows, nextSet] });
         }));
     }
 
     function removeEditWorkoutSet(exerciseId: string, setIndex: number) {
-        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? {
+        setEditWorkoutExercises((prev) => prev.map((exercise) => exercise.id === exerciseId ? recalculateEditableExercisePrs({
             ...exercise,
             setRows: exercise.setRows.filter((_, index) => index !== setIndex).map((set, index) => ({ ...set, set: index + 1 })),
-        } : exercise));
+        }) : exercise));
     }
 
     function startSavedSetSwipe(event: PointerEvent<HTMLElement>, exerciseId: string, setId: string) {
@@ -2644,7 +2954,7 @@ export default function Home() {
         const exercises = routineExercises.map((exercise) => {
             const isBodyweight = exerciseIsBodyweight(exercise.name, exercise.equipment);
             const rows = exercise.setRows
-                .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: isBodyweight ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined }))
+                .map((set, index) => ({ set: index + 1, reps: Number(set.reps), weight: isBodyweight ? 0 : Number(set.weight), notes: set.notes?.trim() || undefined, pr_achievements: set.pr_achievements }))
                 .filter((set) => Number.isFinite(set.reps) && set.reps > 0 && Number.isFinite(set.weight) && set.weight >= 0);
             return { ...exercise, setRows: rows };
         }).filter((exercise) => exercise.name.trim() && exercise.setRows.length);
@@ -2782,6 +3092,10 @@ export default function Home() {
         setEditWorkoutPhotoUrls(nextPhotoUrls);
         setEditWorkoutPhotos([]);
         cancelEditWorkout();
+        await invalidatePrBaselineNames([
+            ...(workout.workout_exercises ?? []).map((exercise) => exercise.exercise_name),
+            ...exerciseUpdates.map((exercise) => exercise.name),
+        ]);
         await loadData();
         setToast(`${workoutName} updated`);
         setTimeout(() => setToast(""), TOAST_DURATION_MS);
@@ -2800,6 +3114,7 @@ export default function Home() {
         setExpandedWorkoutIds((current) => current.filter((id) => id !== workout.id));
         setRecentWorkouts((current) => current.filter((row) => row.id !== workout.id));
         setHistory((current) => current.filter((row) => row.workout_id !== workout.id));
+        await invalidatePrBaselineNames((workout.workout_exercises ?? []).map((exercise) => exercise.exercise_name));
         await loadRecentWorkouts();
         await loadHistory();
         setToast(`${name} deleted`);
@@ -2896,7 +3211,7 @@ export default function Home() {
         setTimeout(() => setToast(""), TOAST_DURATION_MS);
     }
 
-    async function saveExercises(rows: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string }> }>, title: string) {
+    async function saveExercises(rows: Array<{ name: string; sets: Array<{ set: number; reps: number; weight: number; notes?: string; pr_achievements?: PrAchievement[] }> }>, title: string) {
         setSaving(true);
         const { data: workout, error: workoutError } = await supabase
             .from("workouts")
@@ -2931,6 +3246,7 @@ export default function Home() {
         }
 
         setExpandedWorkoutIds((current) => current.includes(workout.id) ? current : [...current, workout.id]);
+        await invalidatePrBaselineNames(rows.map((row) => row.name), userKey, true);
         await loadData();
         setToast("Saved. Nice work 💪");
         setTimeout(() => setToast(""), TOAST_DURATION_MS);
@@ -2944,37 +3260,44 @@ export default function Home() {
 
     function updateQueuedSet(exerciseId: string, setId: string, patch: Partial<Omit<SetRow, "id">>) {
         markWorkoutActivity();
-        setWorkoutQueue((prev) =>
-            prev.map((exercise) =>
-                exercise.id === exerciseId
-                    ? { ...exercise, sets: exercise.sets.map((set) => (set.id === setId ? { ...set, ...patch } : set)) }
-                    : exercise,
-            ),
-        );
+        const currentExercise = workoutQueue.find((exercise) => exercise.id === exerciseId);
+        if (!currentExercise) return;
+        const previousAchievements = currentExercise.sets.find((set) => set.id === setId)?.prAchievements ?? [];
+        const recalculated = recalculateExercisePrs({
+            ...currentExercise,
+            sets: currentExercise.sets.map((set) => set.id === setId ? { ...set, ...patch } : set),
+        });
+        setWorkoutQueue((current) => current.map((exercise) => exercise.id === exerciseId ? recalculated : exercise));
+        const nextAchievements = recalculated.sets.find((set) => set.id === setId)?.prAchievements ?? [];
+        const previousTypes = new Set(previousAchievements.map((achievement) => achievement.type));
+        announcePrAchievements(currentExercise.name, currentExercise.image_url, nextAchievements.filter((achievement) => !previousTypes.has(achievement.type)));
     }
 
     function toggleQueuedSetCompleted(exerciseId: string, setId: string, completed: boolean, restSeconds: number) {
         markWorkoutActivity();
-        setWorkoutQueue((prev) => prev.map((exercise) => {
-            if (exercise.id !== exerciseId) return exercise;
-            const isBodyweight = exerciseIsBodyweight(exercise.name, exercise.equipment);
-            return {
-                ...exercise,
-                sets: exercise.sets.map((set, index) => {
-                    if (set.id !== setId) return set;
-                    if (!completed) return { ...set, completed };
-                    const fallback = previousBestSetValues(exercise.name, index + 1);
-                    return {
-                        ...set,
-                        completed,
-                        prefilled: false,
-                        reps: set.reps || fallback?.reps || "",
-                        weight: isBodyweight ? "0" : set.weight || fallback?.weight || "",
-                    };
-                }),
-            };
-        }));
-        if (completed) startRestTimer(restSeconds, workoutQueue.find((exercise) => exercise.id === exerciseId)?.name ?? "Rest timer");
+        const currentExercise = workoutQueue.find((exercise) => exercise.id === exerciseId);
+        if (!currentExercise) return;
+        const isBodyweight = exerciseIsBodyweight(currentExercise.name, currentExercise.equipment);
+        const recalculated = recalculateExercisePrs({
+            ...currentExercise,
+            sets: currentExercise.sets.map((set, index) => {
+                if (set.id !== setId) return set;
+                if (!completed) return { ...set, completed, prAchievements: [] };
+                const fallback = previousBestSetValues(currentExercise.name, index + 1);
+                return {
+                    ...set,
+                    completed,
+                    prefilled: false,
+                    reps: set.reps || fallback?.reps || "",
+                    weight: isBodyweight ? "0" : set.weight || fallback?.weight || "",
+                };
+            }),
+        });
+        setWorkoutQueue((current) => current.map((exercise) => exercise.id === exerciseId ? recalculated : exercise));
+        if (completed) {
+            announcePrAchievements(currentExercise.name, currentExercise.image_url, recalculated.sets.find((set) => set.id === setId)?.prAchievements ?? []);
+            startRestTimer(restSeconds, currentExercise.name || "Rest timer");
+        }
     }
 
     function addQueuedSet(exerciseId: string) {
@@ -3487,7 +3810,7 @@ export default function Home() {
                                                                     setOpenSwipeSet(info.offset.x < -36 || info.velocity.x < -420 ? { exerciseId: exercise.id, setId: set.id, offset: -SWIPE_DELETE_WIDTH } : null);
                                                                 }}
                                                             >
-                                                                <span className="set-number">{index + 1}</span>
+                                                                {renderSetMarker(exercise.name, index + 1, set.prAchievements)}
                                                                 {!isBodyweightExercise && (
                                                                     <div className="weight-control">
                                                                         <input
@@ -3496,6 +3819,7 @@ export default function Home() {
                                                                             aria-label={`${exercise.name} set ${index + 1} weight in lbs`}
                                                                             placeholder={set.prefilled && !set.completed && set.weight ? set.weight : set.weight ? "0" : fallbackValues?.weight ?? "0"}
                                                                             value={set.prefilled && !set.completed ? "" : set.weight}
+                                                                            onFocus={focusTrackerSetInput}
                                                                             onChange={(event) => updateQueuedSet(exercise.id, set.id, { weight: event.target.value.replace(/[^0-9.]/g, ""), prefilled: false })}
                                                                         />
                                                                     </div>
@@ -3507,6 +3831,7 @@ export default function Home() {
                                                                         aria-label={`${exercise.name} set ${index + 1} reps`}
                                                                         placeholder={set.prefilled && !set.completed && set.reps ? set.reps : set.reps ? "0" : fallbackValues?.reps ?? "0"}
                                                                         value={set.prefilled && !set.completed ? "" : set.reps}
+                                                                        onFocus={focusTrackerSetInput}
                                                                         onChange={(event) => updateQueuedSet(exercise.id, set.id, { reps: event.target.value.replace(/\D/g, ""), prefilled: false })}
                                                                     />
                                                                 </div>
@@ -3705,7 +4030,7 @@ export default function Home() {
                                                                         onPointerCancel={endSavedSetSwipe}
                                                                     >
                                                                         <div className={isBodyweightEditExercise ? "set-grid queued-set-grid saved-edit-set-grid bodyweight-edit-set-grid" : "set-grid queued-set-grid saved-edit-set-grid"}>
-                                                                            <span className="set-number">{index + 1}</span>
+                                                                            {renderSetMarker(exercise.name, index + 1, set.pr_achievements)}
                                                                             {!isBodyweightEditExercise && <div className="weight-control">
                                                                                 <input className="input weight-input" inputMode="decimal" aria-label={`${exercise.name || "Exercise"} set ${index + 1} weight in lbs`} placeholder="0" value={set.weight} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { weight: Number(event.target.value.replace(/[^0-9.]/g, "")) })} />
                                                                             </div>}
@@ -3848,7 +4173,7 @@ export default function Home() {
                                                                             </div>
                                                                             {setRows.map((set, setIndex) => (
                                                                                 <div className="workout-card-set-row" key={`${exercise.id}-${set.set}-${setIndex}`}>
-                                                                                    <span>{setIndex + 1}</span>
+                                                                                    {renderSetMarker(exercise.exercise_name, setIndex + 1, set.pr_achievements)}
                                                                                     <span>{set.reps}</span>
                                                                                     <span>{set.weight} lbs</span>
                                                                                 </div>
@@ -4089,7 +4414,7 @@ export default function Home() {
                                                                                                     </div>
                                                                                                     {displayRows.map((set, index) => (
                                                                                                         <div className="set-detail-row" style={{ gridTemplateColumns: isEditingWorkout ? "0.5fr 1fr 1fr 1.25fr 34px" : "0.6fr 1fr 1fr 1.3fr" }} key={`${exercise.id}-${set.set}-${index}`}>
-                                                                                                            <span>{index + 1}</span>
+                                                                                                            {renderSetMarker(exerciseNameValue, index + 1, set.pr_achievements)}
                                                                                                             {isEditingWorkout ? (
                                                                                                                 <>
                                                                                                                     <input className="detail-input" inputMode="numeric" value={set.reps} onChange={(event) => updateEditWorkoutSet(exercise.id, index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
@@ -4306,7 +4631,7 @@ export default function Home() {
                                                     </div>
                                                     {rows.map((set) => (
                                                         <div className="set-detail-row" style={{ gridTemplateColumns: "0.6fr 1fr 1fr 1.3fr" }} key={`${record.id}-${set.set}`}>
-                                                            <span>{set.set}</span>
+                                                            {renderSetMarker(record.exercise_name, Number(set.set), set.pr_achievements)}
                                                             <span>{set.reps}</span>
                                                             <span>{set.weight} lbs</span>
                                                             <span>{set.notes || "—"}</span>
@@ -4525,6 +4850,47 @@ export default function Home() {
                                 })}
                             </div>
                         </motion.div>
+                    </>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {prSheet && (
+                    <>
+                        <motion.button className="bottom-sheet-backdrop" type="button" aria-label="Close personal record details" onClick={() => setPrSheet(null)} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} />
+                        <motion.section
+                            className="bottom-sheet pr-detail-sheet"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="pr-detail-title"
+                            initial={{ y: "100%" }}
+                            animate={{ y: 0 }}
+                            exit={{ y: "100%" }}
+                            transition={{ type: "spring", stiffness: 380, damping: 36 }}
+                            drag="y"
+                            dragConstraints={{ top: 0, bottom: 180 }}
+                            dragElastic={0.14}
+                            dragMomentum={false}
+                            dragSnapToOrigin
+                            onDragEnd={(_, info) => {
+                                if (info.offset.y > 78 || info.velocity.y > 520) setPrSheet(null);
+                            }}
+                        >
+                            <div className="bottom-sheet-handle" aria-hidden="true" />
+                            <div className="pr-detail-heading">
+                                <h3 id="pr-detail-title">New Record</h3>
+                                <p>{prSheet.exerciseName}</p>
+                            </div>
+                            <div className="pr-detail-list">
+                                {prSheet.achievements.map((achievement) => (
+                                    <div className="pr-detail-row" key={achievement.type}>
+                                        <span className="pr-record-medal"><Medal size={22} aria-hidden="true" /></span>
+                                        <strong className="pr-detail-label">{PR_LABELS[achievement.type]}</strong>
+                                        <span className="pr-detail-values"><span>{formatPrValue(achievement.type, achievement.value)}</span><strong>↑ {formatPrValue(achievement.type, achievement.value - achievement.previousValue)}</strong></span>
+                                    </div>
+                                ))}
+                            </div>
+                        </motion.section>
                     </>
                 )}
             </AnimatePresence>
@@ -5015,7 +5381,7 @@ export default function Home() {
                                                                 <div className="workout-card-set-head" aria-hidden="true"><span>Set</span><span>Weight</span><span>Reps</span></div>
                                                                 {rows.map((set, index) => (
                                                                     <div className="workout-card-set-row" key={`${exercise.id}-${set.set}-${index}`}>
-                                                                        <span>{index + 1}</span><span>{set.weight} lbs</span><span>{set.reps}</span>
+                                                                        {renderSetMarker(exercise.exercise_name, index + 1, set.pr_achievements)}<span>{set.weight} lbs</span><span>{set.reps}</span>
                                                                     </div>
                                                                 ))}
                                                             </div>
@@ -5188,6 +5554,41 @@ export default function Home() {
             </Dialog.Root>
 
             {toast && <div className="toast">{toast}</div>}
+            <AnimatePresence>
+                {prToast && (
+                    <motion.div
+                        className={`toast pr-toast ${prToastPhase}`}
+                        role="status"
+                        aria-live="polite"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.18, ease: "easeOut" }}
+                    >
+                        <span className="pr-toast-image">
+                            {prToast.imageUrl ? <img src={prToast.imageUrl} alt="" /> : <Award size={25} aria-hidden="true" />}
+                        </span>
+                        <span className="pr-toast-copy">
+                            <strong>{prToast.exerciseName}</strong>
+                            <span className="pr-toast-achievement-window">
+                                <AnimatePresence mode="wait">
+                                    {prToastPhase === "open" && (
+                                        <motion.span
+                                            key={prToast.text}
+                                            initial={{ opacity: 0, y: 24 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            exit={{ opacity: 0, y: -8 }}
+                                            transition={{ duration: 0.3, delay: 0.06, ease: [0.22, 1, 0.36, 1] }}
+                                        >
+                                            {prToast.text}
+                                        </motion.span>
+                                    )}
+                                </AnimatePresence>
+                            </span>
+                        </span>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </main>
     );
 }

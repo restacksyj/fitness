@@ -37,6 +37,105 @@ create index if not exists workouts_user_created_idx on public.workouts(user_key
 create index if not exists workout_exercises_user_created_idx on public.workout_exercises(user_key, created_at desc);
 create index if not exists workout_exercises_user_name_idx on public.workout_exercises(user_key, lower(exercise_name));
 
+-- Run this block once in the Supabase SQL Editor. It calculates authoritative
+-- all-time PR baselines without storing a second, drift-prone summary table.
+create or replace function public.get_exercise_pr_baselines(
+  exercise_names text[],
+  before_timestamp timestamptz default now()
+)
+returns table (
+  exercise_key text,
+  historical_sessions bigint,
+  max_weight numeric,
+  max_estimated_1rm numeric,
+  max_set_volume numeric,
+  max_session_volume numeric,
+  max_set_reps numeric,
+  max_session_reps numeric
+)
+language sql
+stable
+security invoker
+set search_path = ''
+as $$
+  with requested as (
+    select distinct lower(trim(requested_name.value)) as exercise_key
+    from unnest(exercise_names) as requested_name(value)
+    where trim(requested_name.value) <> ''
+  ), source_rows as (
+    select
+      we.workout_id,
+      lower(trim(we.exercise_name)) as exercise_key,
+      case
+        when jsonb_typeof(we.set_rows) = 'array' and jsonb_array_length(we.set_rows) > 0 then we.set_rows
+        else jsonb_build_array(jsonb_build_object('reps', we.reps, 'weight', we.weight))
+      end as set_rows
+    from public.workout_exercises we
+    join requested r on r.exercise_key = lower(trim(we.exercise_name))
+    where we.user_key = (select auth.uid())::text
+      and we.created_at < before_timestamp
+  ), sets as (
+    select
+      source_rows.workout_id,
+      source_rows.exercise_key,
+      case when set_row.value->>'reps' ~ '^[0-9]+([.][0-9]+)?$' then (set_row.value->>'reps')::numeric else 0 end as reps,
+      case when set_row.value->>'weight' ~ '^[0-9]+([.][0-9]+)?$' then (set_row.value->>'weight')::numeric else 0 end as weight
+    from source_rows
+    cross join lateral jsonb_array_elements(source_rows.set_rows) as set_row(value)
+  ), valid_sets as (
+    select
+      workout_id,
+      exercise_key,
+      reps,
+      weight,
+      weight * reps as set_volume,
+      case when reps = 1 then weight else weight * (1 + reps / 30.0) end as estimated_1rm
+    from sets
+    where reps > 0 and weight >= 0
+  ), set_bests as (
+    select
+      exercise_key,
+      max(weight) as max_weight,
+      max(estimated_1rm) as max_estimated_1rm,
+      max(set_volume) as max_set_volume,
+      max(reps) as max_set_reps
+    from valid_sets
+    group by exercise_key
+  ), sessions as (
+    select
+      workout_id,
+      exercise_key,
+      sum(set_volume) as session_volume,
+      sum(reps) as session_reps
+    from valid_sets
+    group by workout_id, exercise_key
+  ), session_bests as (
+    select
+      exercise_key,
+      count(*)::bigint as historical_sessions,
+      max(session_volume) as max_session_volume,
+      max(session_reps) as max_session_reps
+    from sessions
+    group by exercise_key
+  )
+  select
+    r.exercise_key,
+    coalesce(sb.historical_sessions, 0),
+    coalesce(setb.max_weight, 0),
+    coalesce(setb.max_estimated_1rm, 0),
+    coalesce(setb.max_set_volume, 0),
+    coalesce(sb.max_session_volume, 0),
+    coalesce(setb.max_set_reps, 0),
+    coalesce(sb.max_session_reps, 0)
+  from requested r
+  left join set_bests setb using (exercise_key)
+  left join session_bests sb using (exercise_key);
+$$;
+
+revoke execute on function public.get_exercise_pr_baselines(text[], timestamptz) from public;
+revoke execute on function public.get_exercise_pr_baselines(text[], timestamptz) from anon;
+grant execute on function public.get_exercise_pr_baselines(text[], timestamptz) to authenticated;
+
 create table if not exists public.routines (
   id uuid primary key default gen_random_uuid(),
   user_key text not null,

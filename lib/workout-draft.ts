@@ -1,4 +1,6 @@
-export type SetRow = { id: string; reps: string; weight: string; notes?: string; completed?: boolean; prefilled?: boolean };
+import type { PrAchievement } from "./personal-records";
+
+export type SetRow = { id: string; reps: string; weight: string; notes?: string; completed?: boolean; prefilled?: boolean; prAchievements?: PrAchievement[] };
 export type ExerciseDraft = {
   id: string;
   name: string;

@@ -3,16 +3,21 @@
 import Link from "next/link";
 import * as Dialog from "@radix-ui/react-dialog";
 import { format } from "date-fns";
+import { motion } from "framer-motion";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DayPicker, type DateRange } from "react-day-picker";
 import "react-day-picker/style.css";
-import { ArrowLeft, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Plus, Search, Trash2, X } from "lucide-react";
+import { ArrowLeft, Award, Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Dumbbell, Edit3, Medal, Plus, Search, Trash2, X } from "lucide-react";
+import { invalidateCachedPrBaselines } from "@/lib/offline-db";
+import { calculatePrAchievements, EMPTY_PR_BASELINE, formatPrValue, PR_LABELS, type PrAchievement, type PrBaseline } from "@/lib/personal-records";
 import { isSupabaseConfigured, supabase, type ExerciseCatalogItem, type WorkoutExercise, type WorkoutSetRow } from "@/lib/supabase";
 
 const PAGE_SIZE = 10;
 const normalise = (name: string) => name.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ").replace(/\btriceps\b/g, "tricep");
 const exerciseSearchVariants = (name: string) => Array.from(new Set([name.trim(), name.trim().replace(/\btriceps\b/gi, "tricep"), name.trim().replace(/\btricep\b/gi, "triceps")].filter(Boolean)));
 type ExerciseSuggestion = Pick<ExerciseCatalogItem, "id" | "name" | "category" | "muscles" | "equipment" | "image_url"> & { source: "catalog" | "history" };
+type PrBaselineRpcRow = { exercise_key: string; historical_sessions: number | string; max_weight: number | string; max_estimated_1rm: number | string; max_set_volume: number | string; max_session_volume: number | string; max_set_reps: number | string; max_session_reps: number | string };
+const MotionDialogContent = motion.create(Dialog.Content);
 
 function inputDateToDate(value: string) {
     return value ? new Date(`${value}T00:00:00`) : undefined;
@@ -71,6 +76,7 @@ export default function HistoryPage() {
     const [editingRecordId, setEditingRecordId] = useState("");
     const [editRows, setEditRows] = useState<WorkoutSetRow[]>([]);
     const [pendingDeleteRecord, setPendingDeleteRecord] = useState<WorkoutExercise | null>(null);
+    const [prSheet, setPrSheet] = useState<{ exerciseName: string; setNumber: number; achievements: PrAchievement[] } | null>(null);
     const historyRequestId = useRef(0);
 
     useEffect(() => {
@@ -187,7 +193,7 @@ export default function HistoryPage() {
 
     function startEditing(record: WorkoutExercise, rows: WorkoutSetRow[]) {
         setEditingRecordId(record.id);
-        setEditRows(rows.map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight), notes: row.notes ?? "" })));
+        setEditRows(rows.map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight), notes: row.notes ?? "", pr_achievements: row.pr_achievements })));
     }
 
     function updateEditRow(index: number, patch: Partial<WorkoutSetRow>) {
@@ -207,11 +213,31 @@ export default function HistoryPage() {
     }
 
     async function saveEdit(record: WorkoutExercise) {
-        const rows = editRows
-            .map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight), notes: row.notes?.trim() || undefined }))
+        let rows = editRows
+            .map((row, index) => ({ set: index + 1, reps: Number(row.reps), weight: Number(row.weight), notes: row.notes?.trim() || undefined, pr_achievements: row.pr_achievements }))
             .filter((row) => Number.isFinite(row.reps) && row.reps > 0 && Number.isFinite(row.weight) && row.weight >= 0);
 
         if (!rows.length) return alert("Add at least one valid set.");
+
+        const { data: baselineRows, error: baselineError } = await supabase.rpc("get_exercise_pr_baselines", {
+            exercise_names: [record.exercise_name],
+            before_timestamp: record.created_at,
+        });
+        if (baselineError) return alert(`Could not recalculate personal records: ${baselineError.message}`);
+        const source = ((baselineRows ?? []) as PrBaselineRpcRow[])[0];
+        const baseline: PrBaseline = source ? {
+            historicalSessions: Number(source.historical_sessions) || 0,
+            maxWeight: Number(source.max_weight) || 0,
+            maxEstimated1Rm: Number(source.max_estimated_1rm) || 0,
+            maxSetVolume: Number(source.max_set_volume) || 0,
+            maxSessionVolume: Number(source.max_session_volume) || 0,
+            maxSetReps: Number(source.max_set_reps) || 0,
+            maxSessionReps: Number(source.max_session_reps) || 0,
+        } : EMPTY_PR_BASELINE;
+        const bodyweight = rows.every((row) => row.weight === 0);
+        const ids = rows.map((_, index) => `edit-${index}`);
+        const achievements = calculatePrAchievements(rows.map((row, index) => ({ id: ids[index], reps: row.reps, weight: row.weight, completed: true })), baseline, bodyweight);
+        rows = rows.map((row, index) => ({ ...row, pr_achievements: achievements.get(ids[index]) ?? [] }));
 
         const payload = {
             sets: rows.length,
@@ -225,6 +251,7 @@ export default function HistoryPage() {
         if (error) return alert(error.message);
 
         setHistory((current) => current.map((row) => row.id === record.id ? { ...row, ...payload } : row));
+        await invalidateCachedPrBaselines(userKey, [normalise(record.exercise_name)]);
         setEditingRecordId("");
         setEditRows([]);
     }
@@ -235,6 +262,7 @@ export default function HistoryPage() {
         if (error) return alert(error.message);
 
         setHistory((current) => current.filter((row) => row.id !== pendingDeleteRecord.id));
+        await invalidateCachedPrBaselines(userKey, [normalise(pendingDeleteRecord.exercise_name)]);
         setPendingDeleteRecord(null);
         setExpandedRecordId("");
         setEditingRecordId("");
@@ -392,7 +420,9 @@ export default function HistoryPage() {
                                                                     </div>
                                                                     {displayRows.map((set, index) => (
                                                                         <div className="set-detail-row" style={{ gridTemplateColumns: isEditing ? "0.5fr 1fr 1fr 1.25fr 34px" : "0.6fr 1fr 1fr 1.3fr" }} key={`${record.id}-${set.set}-${index}`}>
-                                                                            <span>{index + 1}</span>
+                                                                            {set.pr_achievements?.length ? (
+                                                                                <button className="pr-medal-btn" type="button" aria-label={`${record.exercise_name} set ${index + 1} personal records`} onClick={() => setPrSheet({ exerciseName: record.exercise_name, setNumber: index + 1, achievements: set.pr_achievements ?? [] })}><Award size={21} aria-hidden="true" /></button>
+                                                                            ) : <span>{index + 1}</span>}
                                                                             {isEditing ? (
                                                                                 <>
                                                                                     <input className="detail-input" inputMode="numeric" value={set.reps} onChange={(event) => updateEditRow(index, { reps: Number(event.target.value.replace(/\D/g, "")) })} />
@@ -448,6 +478,39 @@ export default function HistoryPage() {
                             <button className="btn danger" onClick={confirmDeleteRecord}>Delete</button>
                         </div>
                     </Dialog.Content>
+                </Dialog.Portal>
+            </Dialog.Root>
+
+            <Dialog.Root open={Boolean(prSheet)} onOpenChange={(open) => !open && setPrSheet(null)}>
+                <Dialog.Portal>
+                    <Dialog.Overlay className="bottom-sheet-backdrop" />
+                    <MotionDialogContent
+                        className="bottom-sheet pr-detail-sheet"
+                        drag="y"
+                        dragConstraints={{ top: 0, bottom: 180 }}
+                        dragElastic={0.14}
+                        dragMomentum={false}
+                        dragSnapToOrigin
+                        onDragEnd={(_, info) => {
+                            if (info.offset.y > 78 || info.velocity.y > 520) setPrSheet(null);
+                        }}
+                    >
+                        <Dialog.Title className="sr-only">Personal records</Dialog.Title>
+                        <div className="bottom-sheet-handle" aria-hidden="true" />
+                        <div className="pr-detail-heading">
+                            <h3>New Record</h3>
+                            <p>{prSheet?.exerciseName}</p>
+                        </div>
+                        <div className="pr-detail-list">
+                            {prSheet?.achievements.map((achievement) => (
+                                <div className="pr-detail-row" key={achievement.type}>
+                                    <span className="pr-record-medal"><Medal size={22} aria-hidden="true" /></span>
+                                    <strong className="pr-detail-label">{PR_LABELS[achievement.type]}</strong>
+                                    <span className="pr-detail-values"><span>{formatPrValue(achievement.type, achievement.value)}</span><strong>↑ {formatPrValue(achievement.type, achievement.value - achievement.previousValue)}</strong></span>
+                                </div>
+                            ))}
+                        </div>
+                    </MotionDialogContent>
                 </Dialog.Portal>
             </Dialog.Root>
         </main>
